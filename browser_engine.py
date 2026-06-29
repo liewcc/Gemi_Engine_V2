@@ -82,6 +82,9 @@ class BrowserEngine:
         self.is_running = True
         logger.info("engine started headless=%s profile=%s", headless, profile_name)
 
+        # Navigate to the active service's URL on startup
+        await self.navigate(self.BASE_URLS[self._active_service])
+
     async def stop(self):
         """Close browser and clean up sandbox."""
         try:

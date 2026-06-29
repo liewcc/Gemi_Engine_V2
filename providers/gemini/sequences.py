@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import re
+import time
+from datetime import datetime
 
 from providers.base import ProviderAdapter
 from providers.gemini.dom import GeminiDOM
@@ -2662,7 +2664,7 @@ class GeminiSequences(ProviderAdapter):
 
             status = data['status']
             text = data.get('text', '') or ''
-            now = __import__('time').time()
+            now = time.time()
 
             if text and text != last_logged and len(text) > 2:
                 flat = ' '.join(text.replace('\n', ' ').split())
