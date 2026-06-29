@@ -5,54 +5,127 @@ class GeminiDOM:
     No operation logic here — only locator definitions.
     """
 
-    def find_submit_button(self):
-        """Locator for the prompt submit button."""
-        raise NotImplementedError
+    # ── Prompt Input ───────────────────────────────────────────────────────────
 
-    def find_prompt_input(self):
-        """Locator for the prompt text input area."""
-        raise NotImplementedError
+    def prompt_input(self) -> list[str]:
+        """Multiple fallback selectors for the prompt input area."""
+        return [
+            "div[aria-label='Enter a prompt for Gemini']",
+            "div[aria-label='Enter a prompt here']",
+            ".ql-editor",
+            "textarea[aria-label='Enter a prompt for Gemini']",
+            "textarea[aria-label='Enter a prompt here']",
+        ]
 
-    def find_model_dropdown(self):
-        """Locator for the model selector dropdown trigger."""
-        raise NotImplementedError
+    # ── Submit / Stop / Redo ───────────────────────────────────────────────────
 
-    def find_tool_selector(self):
-        """Locator for the tool selection menu."""
-        raise NotImplementedError
+    def submit_button(self) -> str:
+        return (
+            'gem-icon-button.submit button[aria-label="Send message"], '
+            'gem-icon-button.send-button button[aria-label="Send message"], '
+            'button[aria-label="Send message"]'
+        )
 
-    def find_sub_tool_selector(self):
-        """Locator for the sub-tool selection (e.g. Imagen 4 Ultra)."""
-        raise NotImplementedError
+    def stop_button(self) -> str:
+        return 'button[aria-label="Stop response"]'
 
-    def find_thinking_level_selector(self):
-        """Locator for the thinking level selector."""
-        raise NotImplementedError
+    def redo_button(self) -> str:
+        return '[data-automation-temp-redo="true"]'
 
-    def find_stop_button(self):
-        """Locator for the stop generation button."""
-        raise NotImplementedError
+    def try_again_button(self) -> str:
+        return '[data-automation-temp-tryagain="true"]'
 
-    def find_redo_button(self):
-        """Locator for the redo/regenerate button."""
-        raise NotImplementedError
+    # ── New Chat ───────────────────────────────────────────────────────────────
 
-    def find_new_chat_button(self):
-        """Locator for the new chat button."""
-        raise NotImplementedError
+    def new_chat_link(self) -> str:
+        return 'a[aria-label="New chat"]'
 
-    def find_attachment_list(self):
-        """Locator for the list of currently attached files."""
-        raise NotImplementedError
+    def new_chat_button(self) -> str:
+        return 'button[aria-label="New chat"]'
 
-    def find_response_container(self):
-        """Locator for the response output container."""
-        raise NotImplementedError
+    # ── Model / Tool Selection ─────────────────────────────────────────────────
 
-    def find_spinner(self):
-        """Locator for the generation-in-progress spinner."""
-        raise NotImplementedError
+    def model_menu_button(self) -> str:
+        return 'button[data-test-id="bard-mode-menu-button"]'
 
-    def find_image_results(self):
-        """Locator for generated image elements in the response."""
-        raise NotImplementedError
+    def upload_tools_button(self) -> list[str]:
+        return [
+            'button[aria-label="Upload & tools"]',
+            'button.toolbox-drawer-button',
+        ]
+
+    def more_upload_button(self) -> str:
+        return 'button.more-upload-button'
+
+    def more_tools_button(self) -> str:
+        return 'button.more-tools-button'
+
+    def tool_drawer_item(self) -> str:
+        return 'toolbox-drawer-item'
+
+    # ── Attachments ────────────────────────────────────────────────────────────
+
+    def cancel_upload_button(self, file_name: str) -> str:
+        return f'button[data-test-id="cancel-button"][aria-label*="{file_name}"]'
+
+    def cancel_upload_buttons(self) -> str:
+        return 'button[data-test-id="cancel-button"]'
+
+    # ── Response Detection ─────────────────────────────────────────────────────
+
+    def processing_state_container(self) -> str:
+        return 'section.processing-state_container--processing'
+
+    def response_container(self) -> str:
+        """Last response message block."""
+        return 'model-response'
+
+    def image_results(self) -> str:
+        return (
+            'single-image img, img.generated-image, .generated-image img, '
+            '.image-container img, img[alt*="generated" i], img[src^="blob:"]'
+        )
+
+    # ── Image Download ─────────────────────────────────────────────────────────
+
+    def download_full_size_button(self) -> str:
+        return 'button[aria-label="Download full-sized image"]'
+
+    # ── Popups / Agreements ────────────────────────────────────────────────────
+
+    def agreement_popup_buttons(self) -> list[str]:
+        return [
+            'button[aria-label="Dismiss"]',
+            'button:has-text("I agree")',
+            'button:has-text("Accept")',
+            'button:has-text("Got it")',
+        ]
+
+    # ── Account / Profile ──────────────────────────────────────────────────────
+
+    def account_avatar(self) -> str:
+        return (
+            'a[href*="accounts.google.com/SignOut"], '
+            '[aria-label*="Google Account"], '
+            'img.mavatar-image, img.gb_n, '
+            'img[src*="googleusercontent.com/a/"]'
+        )
+
+    # ── Activity / History ─────────────────────────────────────────────────────
+
+    def delete_activity_button(self) -> str:
+        return 'button[aria-label="Delete"]'
+
+    def delete_range_menu_item(self, range_name: str) -> str:
+        return f'li[role="menuitem"]:has-text("{range_name}")'
+
+    def modal_delete_button(self) -> str:
+        return 'button:has-text("Delete"), button[jsname="nUV0Pd"]'
+
+    def modal_confirm_button(self) -> str:
+        return 'button:has-text("Got it"), button:has-text("OK")'
+
+    # ── Conversations List ─────────────────────────────────────────────────────
+
+    def conversations_list(self) -> str:
+        return 'div[data-test-id="conversations-list"]'
