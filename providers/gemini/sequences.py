@@ -2407,22 +2407,293 @@ class GeminiSequences(ProviderAdapter):
             logger.debug(f"Error extracting gem info: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def attach_file(self, path: str):
-        """Attach a single file. Extracted from attach_files — implement per v2 atomic spec."""
-        raise NotImplementedError("attach_file: implement single-file attach from attach_files logic")
+    # ── DOM helper: read currently attached filenames from Gemini UI ──────────────
 
-    async def remove_file(self, path: str):
-        """Remove a single attached file by path."""
-        raise NotImplementedError("remove_file: implement single-file remove from attach_files cancel logic")
+    async def _get_attached_filenames(self) -> list[str]:
+        """Return list of display filenames currently shown in the attachment strip."""
+        raw_labels = await self._e._page.evaluate('''() => {
+            const buttons = Array.from(document.querySelectorAll('button[data-test-id="cancel-button"]'));
+            return buttons.map(btn => btn.getAttribute('aria-label') || '').filter(l => l.length > 0);
+        }''')
+        filenames = []
+        for label in raw_labels:
+            parts = label.split()
+            low = [p.lower() for p in parts]
+            if 'file' in low:
+                idx = low.index('file')
+                name = ' '.join(parts[idx + 1:]).strip()
+            else:
+                name = parts[-1].strip()
+            if name.endswith('.'):
+                name = name[:-1]
+            filenames.append(name.strip())
+        return filenames
 
     async def get_current_attachments(self) -> list:
-        """Return list of currently attached file paths."""
-        raise NotImplementedError("get_current_attachments: scan DOM for current attachment list")
+        """Return display filenames of files currently attached in the Gemini input strip."""
+        return await self._get_attached_filenames()
+
+    async def attach_file(self, path: str):
+        """Upload a single local file to the Gemini prompt input.
+
+        Skips if a file with the same stem is already attached (Gemini renames
+        extensions on upload, so stem-matching avoids duplicate uploads).
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"attach_file: file not found: {path}")
+
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        attached = await self._get_attached_filenames()
+        attached_stems = [os.path.splitext(n)[0].lower() for n in attached]
+
+        if stem in attached_stems:
+            logger.debug("attach_file: already attached (stem match): %s", path)
+            return
+
+        async with self._e._page.expect_file_chooser(timeout=20_000) as fc_info:
+            await self._e._page.evaluate('''() => {
+                const plusBtn =
+                    document.querySelector('button[aria-label="Upload & tools"]') ||
+                    document.querySelector('button[aria-label="Open upload file menu"]') ||
+                    document.querySelector('button[aria-label*="upload" i]') ||
+                    document.querySelector('button[aria-label*="Upload" i]');
+                if (plusBtn) { plusBtn.click(); return; }
+                const icon = document.querySelector('mat-icon[data-mat-icon-name="add_2"]') ||
+                             document.querySelector('mat-icon[fonticon="add"]');
+                if (icon) { icon.closest('button').click(); }
+            }''')
+            await asyncio.sleep(1.2)
+            await self._e._page.evaluate('''() => {
+                const explicit = document.querySelector(
+                    '[data-test-id="local-images-files-uploader-icon"]');
+                if (explicit) {
+                    const item = explicit.closest('.mat-mdc-menu-item, [role="menuitem"], button');
+                    if (item) { item.click(); return; }
+                }
+                const opt = Array.from(document.querySelectorAll(
+                    '.menu-text, span, .mdc-list-item__primary-text'))
+                    .find(i => /upload|attach/i.test(i.innerText));
+                if (opt) opt.click();
+            }''')
+            chooser = await fc_info.value
+            await chooser.set_files(path)
+
+        await self.dismiss_agreement_popups()
+        await asyncio.sleep(2.5)
+        logger.debug("attach_file: uploaded %s", path)
+
+    async def remove_file(self, path: str):
+        """Click the cancel button for the file whose name stem matches `path`.
+
+        Gemini renames extensions on upload, so matching is done by stem.
+        """
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        attached = await self._get_attached_filenames()
+
+        for display_name in attached:
+            if os.path.splitext(display_name)[0].lower() == stem:
+                selector = (
+                    f'button[data-test-id="cancel-button"][aria-label*="{display_name}"]'
+                )
+                btn = self._e._page.locator(selector).first
+                if await btn.is_visible():
+                    await btn.click()
+                    await asyncio.sleep(0.8)
+                    logger.debug("remove_file: removed %s", display_name)
+                    return
+        logger.debug("remove_file: no attachment matched stem %s", stem)
 
     async def submit(self):
-        """Click submit button only. Extracted from submit_response — no wait."""
-        raise NotImplementedError("submit: extract click-only step from submit_response")
+        """Click the Send / Submit button.
+
+        Tries keyboard Enter first; falls back to button click if the prompt
+        remains in the input box after 0.8 s (matches v1 behaviour).
+        """
+        await self._e._page.keyboard.press('Enter')
+        await asyncio.sleep(0.8)
+
+        still_has_text = await self._e._page.evaluate('''() => {
+            const ed = document.querySelector(
+                ".ql-editor, div[aria-label='Enter a prompt for Gemini'], "
+                + "div[aria-label='Enter a prompt here']");
+            return !!(ed && ed.innerText && ed.innerText.trim().length > 0);
+        }''')
+        if still_has_text:
+            logger.debug("submit: Enter did not clear input — clicking Send button")
+            btn = self._e._page.locator(self._dom.submit_button()).first
+            if await btn.is_visible(timeout=2_000):
+                await btn.click()
+
+        await self.dismiss_agreement_popups()
 
     async def wait_for_response(self, timeout: int = 180) -> dict:
-        """Wait for generation to complete. Extracted from submit_response monitor loop."""
-        raise NotImplementedError("wait_for_response: extract monitor loop from submit_response")
+        """Poll the Gemini DOM until generation is complete.
+
+        Returns a dict with keys: status, message.
+        status values: 'success', 'refused', 'quota_exceeded', 'stopped',
+                       'reset', 'error', 'timeout'.
+        """
+        # Snapshot src of the last image before monitoring (for new-image detection)
+        last_seen_src = await self._e._page.evaluate('''() => {
+            const resps = Array.from(document.querySelectorAll(
+                'model-response, structured-content-container.model-response-text, message-content'));
+            const top = resps.filter(el => !resps.some(p => p !== el && p.contains(el)));
+            if (!top.length) return null;
+            const img = top[top.length - 1].querySelector(
+                'single-image img, img.generated-image, .generated-image img, '
+                + '.image-container img, img[alt*="generated" i], img[src^="blob:"]');
+            return img ? img.src : null;
+        }''')
+
+        quota_kws = ['quota exceeded', 'daily limit', 'reached your limit']
+        refused_kws: list[str] = []
+
+        has_started = False
+        start_gen_time: float | None = None
+        idle_start: float | None = None
+        last_logged = ''
+
+        iterations = max(1, timeout // 2)
+        for _ in range(iterations):
+            data = await self._e._page.evaluate('''(args) => {
+                const bodyText = document.body.innerText.toLowerCase();
+                for (const kw of args.quota) {
+                    if (bodyText.includes(kw)) return { status: "quota_exceeded", text: kw };
+                }
+                const isVisible = el => {
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    return s.display !== "none" && s.visibility !== "hidden" && s.opacity !== "0";
+                };
+                const stopIcon =
+                    document.querySelector('mat-icon[data-mat-icon-name="stop"]') ||
+                    document.querySelector('mat-icon[fonticon="stop"]') ||
+                    document.querySelector('mat-icon[data-mat-icon-name="stop_circle"]') ||
+                    document.querySelector('mat-icon[fonticon="stop_circle"]') ||
+                    (() => {
+                        const sb = document.querySelector(
+                            "gem-icon-button.submit mat-icon, gem-icon-button.send-button mat-icon");
+                        if (!sb) return null;
+                        const n = sb.getAttribute("data-mat-icon-name") || sb.getAttribute("fonticon") || "";
+                        return (n && n !== "arrow_upward" && n !== "send" && n !== "send_spark") ? sb : null;
+                    })();
+                const progressBar = document.querySelector("mat-progress-bar");
+                const activeContainer = document.querySelector("section.processing-state_container--processing");
+
+                if (stopIcon || isVisible(progressBar) || isVisible(activeContainer)) {
+                    const refusalKws = args.refused || [];
+                    let genText = "";
+                    if (activeContainer) {
+                        const pv = document.querySelector("structured-content-container.processing-state-visible");
+                        if (pv) {
+                            const pvTxt = (pv.querySelector(".model-response-text") || pv).innerText.trim();
+                            if (pvTxt && refusalKws.some(kw => pvTxt.toLowerCase().includes(kw.toLowerCase())))
+                                return { status: "refused", text: pvTxt };
+                        }
+                        const lbl = activeContainer.querySelector(".processing-state_ext-name_label span");
+                        const ph  = activeContainer.querySelector(".processing-state_ext-name_placeholder span");
+                        if (lbl && lbl.textContent) { genText = lbl.textContent.trim(); }
+                        else if (ph && ph.textContent) { genText = ph.textContent.trim(); }
+                        else {
+                            const cl = activeContainer.cloneNode(true);
+                            cl.querySelectorAll(".cdk-visually-hidden,[aria-hidden=\\"true\\"]").forEach(e => e.remove());
+                            genText = cl.textContent.trim();
+                        }
+                    } else {
+                        const allR = Array.from(document.querySelectorAll(
+                            "model-response, structured-content-container.model-response-text, message-content"));
+                        const top = allR.filter(el => !allR.some(p => p !== el && p.contains(el)));
+                        const last = top.length ? top[top.length - 1] : null;
+                        if (last) {
+                            const cn = last.querySelector(".model-response-text") || last.querySelector(".message-content") || last;
+                            const cl = cn.cloneNode(true);
+                            cl.querySelectorAll(".cdk-visually-hidden,[aria-hidden=\\"true\\"]").forEach(e => e.remove());
+                            genText = cl.textContent.trim();
+                            if (genText && refusalKws.some(kw => genText.toLowerCase().includes(kw.toLowerCase())))
+                                return { status: "refused", text: genText };
+                        }
+                    }
+                    return { status: "generating", text: genText };
+                }
+
+                const sendModes = [
+                    "mat-icon[data-mat-icon-name=\\"arrow_upward\\"]",
+                    "mat-icon[fonticon=\\"arrow_upward\\"]",
+                    "mat-icon[data-mat-icon-name=\\"send\\"]",
+                    "mat-icon[fonticon=\\"send\\"]",
+                    "mat-icon[data-mat-icon-name=\\"send_spark\\"]",
+                    "mat-icon[fonticon=\\"send_spark\\"]",
+                ];
+                const inSendMode = sendModes.some(s => !!document.querySelector(s));
+                const isGenerating = !!(stopIcon || isVisible(progressBar) || isVisible(activeContainer));
+                const sendReady = (inSendMode && !!(
+                    document.querySelector("[data-test-id=\\"send-button-container\\"].visible") ||
+                    document.querySelector("gem-icon-button.send-button[aria-disabled=\\"false\\"]") ||
+                    document.querySelector("gem-icon-button.submit[aria-disabled=\\"false\\"]") ||
+                    document.querySelector("button[aria-label=\\"Send message\\"]:not([disabled])")
+                )) || (!isGenerating && !sendModes.some(s => !!document.querySelector(s)));
+
+                if (!sendReady) return { status: "loading", text: "" };
+
+                const allR = Array.from(document.querySelectorAll(
+                    "model-response, structured-content-container.model-response-text, message-content"));
+                const top = allR.filter(el => !allR.some(p => p !== el && p.contains(el)));
+                if (!top.length) return { status: "reset", text: "",
+                    inputEmpty: !(document.querySelector(".ql-editor") || {innerText:""}).innerText.trim(),
+                    attachmentCount: document.querySelectorAll("button[data-test-id=\\"cancel-button\\"]").length };
+
+                const last = top[top.length - 1];
+                const imgEl = last.querySelector(
+                    "single-image img, img.generated-image, .generated-image img, "
+                    + ".image-container img, img[alt*=\\"generated\\" i], img[src^=\\"blob:\\"]");
+                const hasImg = !!imgEl && imgEl.src && imgEl.src !== "about:blank" &&
+                    (!args.last_seen_src || imgEl.src !== args.last_seen_src);
+                if (hasImg) return { status: "success", text: "" };
+
+                const cn = last.querySelector(".model-response-text") || last.querySelector(".message-content") || last;
+                const respText = cn.innerText.trim();
+                const refusalKws = args.refused || [];
+                const complete = !!last.querySelector(".response-footer.complete");
+                if ((complete || refusalKws.some(kw => respText.toLowerCase().includes(kw.toLowerCase()))) && respText)
+                    return { status: "refused", text: respText };
+
+                return { status: "idle_no_img", text: respText };
+            }''', {'quota': quota_kws, 'refused': refused_kws, 'last_seen_src': last_seen_src})
+
+            status = data['status']
+            text = data.get('text', '') or ''
+            now = __import__('time').time()
+
+            if text and text != last_logged and len(text) > 2:
+                flat = ' '.join(text.replace('\n', ' ').split())
+                logger.debug('Gemini: "%s"', flat[:200])
+                last_logged = text
+
+            if status == 'generating':
+                idle_start = None
+                if not has_started:
+                    has_started = True
+                    start_gen_time = now
+            elif status == 'success':
+                return {'status': 'success', 'message': 'Image generated successfully.'}
+            elif status == 'quota_exceeded':
+                return {'status': 'error', 'message': 'Quota exceeded. Please wait before retrying.'}
+            elif status == 'refused':
+                flat = ' '.join(text.replace('\n', ' ').split())
+                return {'status': 'refused', 'message': f'Gemini refused: {flat[:300]}'}
+            elif status == 'idle_no_img':
+                if not idle_start:
+                    idle_start = now
+                if has_started and start_gen_time and (now - start_gen_time > 4.0):
+                    return {'status': 'error', 'message': 'Stopped or failed to generate image.'}
+                if (now - idle_start) > 8.0:
+                    flat = ' '.join(text.replace('\n', ' ').split())
+                    return {'status': 'refused', 'message': f'Gemini refused (sustained idle): {flat[:300]}'}
+            elif status == 'reset':
+                if has_started:
+                    return {'status': 'error', 'message': 'Gemini page reset unexpectedly during generation.'}
+                return {'status': 'reset', 'message': 'Gemini reset before generation started.'}
+
+            await asyncio.sleep(2)
+
+        return {'status': 'timeout', 'message': f'Timed out after {timeout}s waiting for response.'}
