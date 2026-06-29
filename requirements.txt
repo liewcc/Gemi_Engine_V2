@@ -1,0 +1,6 @@
+playwright
+fastapi
+uvicorn[standard]
+httpx
+pillow
+python-multipart

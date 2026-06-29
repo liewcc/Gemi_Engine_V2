@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+browser_user_data/
+browser_session_sandbox/
+data/config.json
+data/user_login_lookup.json
+data/refused_keywords.json
+data/quota_full_keywords.json
+engine.log
+engine.log.*
+*.tmp
