@@ -59,9 +59,17 @@ class BrowserEngine:
     def is_running(self, val):
         self._is_running = val
 
+    @property
+    def _page(self):
+        return self._pages.get(self._active_service)
+
+    @_page.setter
+    def _page(self, val):
+        pass  # legacy no-op
+
     def __init__(self):
         self._is_running = False
-        self._page = None
+        self._pages = {}
         self._browser = None
         self._playwright = None
         self._active_service = 'gemini'
@@ -71,6 +79,9 @@ class BrowserEngine:
         # Registration browser handles (separate Playwright instance, no sandbox)
         self._reg_playwright = None
         self._reg_context = None
+        # ponytail: never-set event; providers check this to abort wait loops
+        import asyncio as _asyncio
+        self._stop_automation_event = _asyncio.Event()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -111,8 +122,6 @@ class BrowserEngine:
                 '--profile-directory=Default'
             ],
         )
-        self._page = self._browser.pages[0] if self._browser.pages else await self._browser.new_page()
-
         self.browser_pids = [self._browser.process.pid] if hasattr(self._browser, 'process') and self._browser.process else []
 
         # Instantiate all providers
@@ -120,11 +129,23 @@ class BrowserEngine:
             name: cls(self) for name, cls in self._PROVIDER_REGISTRY.items()
         }
 
+        # Open one tab per provider and navigate in parallel
+        import asyncio
+        provider_names = list(self._PROVIDER_REGISTRY.keys())
+        existing_pages = self._browser.pages
+        for i, name in enumerate(provider_names):
+            if i == 0:
+                page = existing_pages[0] if existing_pages else await self._browser.new_page()
+            else:
+                page = await self._browser.new_page()
+            self._pages[name] = page
+        await asyncio.gather(*[
+            self._pages[name].goto(self.BASE_URLS[name], wait_until='domcontentloaded')
+            for name in provider_names
+        ])
+
         self.is_running = True
         logger.info("engine started headless=%s profile=%s", headless, profile_name)
-
-        # Navigate to the active service's URL on startup
-        await self.navigate(self.BASE_URLS[self._active_service])
 
     async def stop(self):
         """Close browser and clean up sandbox."""
@@ -139,7 +160,7 @@ class BrowserEngine:
             await self._cleanup_sandbox()
             self._browser = None
             self._playwright = None
-            self._page = None
+            self._pages = {}
             self._providers = {}
             self.is_running = False
             self.browser_pids = []
@@ -325,11 +346,10 @@ class BrowserEngine:
         return self._providers[self._active_service]
 
     async def switch_service(self, service: str):
-        """Switch to a different provider and navigate to its URL."""
+        """Switch the active provider tab (no navigation — tabs are pre-loaded at start)."""
         if service not in self._PROVIDER_REGISTRY:
             raise ValueError(f"Unknown service: {service}")
         self._active_service = service
-        await self.navigate(self.BASE_URLS[service])
         logger.info("switched service to %s", service)
 
     # ── Account / Profile ──────────────────────────────────────────────────────

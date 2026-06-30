@@ -28,6 +28,12 @@ if os.name == 'nt':
 app = FastAPI(title='Gemi Engine V2')
 engine = BrowserEngine()
 
+
+async def _route_service(service: Optional[str]):
+    """Switch active provider if service param is given and differs from current."""
+    if service and service != engine._active_service:
+        await engine.switch_service(service)
+
 # ── Request Models ─────────────────────────────────────────────────────────────
 class StartRequest(BaseModel):
     headless: bool = True
@@ -228,6 +234,7 @@ async def switch_service(req: SwitchServiceRequest):
 @app.post('/browser/discover')
 async def discover(service: Optional[str] = Query(None)):
     try:
+        await _route_service(service)
         data = await engine.discover_capabilities()
         return {'status': 'success', 'data': data}
     except Exception as e:
@@ -236,6 +243,7 @@ async def discover(service: Optional[str] = Query(None)):
 @app.post('/browser/apply_settings')
 async def apply_settings(req: ApplySettingsRequest):
     try:
+        await _route_service(req.service)
         await engine.apply_settings(
             model=req.model, tool=req.tool,
             sub_tool=req.sub_tool, thinking_level=req.thinking_level
@@ -325,6 +333,7 @@ async def redo_response():
 @app.post('/browser/new_chat')
 async def new_chat(service: Optional[str] = Query(None)):
     try:
+        await _route_service(service)
         await engine.new_chat()
         return {'status': 'success'}
     except Exception as e:
@@ -333,6 +342,7 @@ async def new_chat(service: Optional[str] = Query(None)):
 @app.post('/browser/download')
 async def download_images(req: DownloadRequest):
     try:
+        await _route_service(req.service)
         naming_cfg = {'prefix': req.prefix, 'padding': req.padding, 'start': req.start}
         result = await engine.download_images(req.save_dir, naming_cfg)
         return result
