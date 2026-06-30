@@ -6,21 +6,21 @@ class DeepSeekDOM:
     """
 
     def find_submit_button(self) -> list[str]:
+        # DeepSeek uses a div[role="button"] with DS design-system classes, not <button>.
+        # The send button is a circle primary button; when text is present it loses --disabled.
         return [
-            'button[type="submit"]',
-            'button[aria-label="Send"]',
-            'button[class*="submit"]',
-            'button[class*="send"]',
-            'div[class*="sendButton"]'
+            'div.ds-button.ds-button--primary.ds-button--filled.ds-button--circle:not(.ds-button--disabled)',
+            'div.ds-button--circle:not(.ds-button--disabled)',
+            'div[role="button"].ds-button--primary',
         ]
 
     def find_prompt_input(self) -> list[str]:
+        # Live DOM: <textarea placeholder="Message DeepSeek" name="search" ...>
+        # The textarea has hashed classes; target by placeholder attribute.
         return [
-            'textarea#chat-input',
-            'textarea[placeholder*="Ask"]',
-            'textarea[aria-label*="Chat"]',
+            'textarea[placeholder="Message DeepSeek"]',
+            'textarea[name="search"]',
             'textarea',
-            'div.ql-editor'
         ]
 
     def find_model_dropdown(self) -> list[str]:
@@ -49,10 +49,12 @@ class DeepSeekDOM:
         ]
 
     def find_stop_button(self) -> list[str]:
+        # During streaming DeepSeek swaps the send button icon to a stop square.
+        # The circle button remains but the SVG changes; target the active circle button.
         return [
+            'div.ds-button.ds-button--primary.ds-button--filled.ds-button--circle:not(.ds-button--disabled)',
+            'div.ds-button--circle:not(.ds-button--disabled)',
             'button[aria-label="Stop"]',
-            'div[class*="stopButton"]',
-            'button[class*="stop"]'
         ]
 
     def find_redo_button(self) -> list[str]:
@@ -76,17 +78,22 @@ class DeepSeekDOM:
         ]
 
     def find_response_container(self) -> list[str]:
+        # Live DOM (confirmed): DeepSeek renders AI replies inside ds-markdown divs.
+        # ds-markdown--block is the outer prose wrapper; ds-markdown alone catches partial renders.
         return [
-            'div[class*="message-container"]',
-            '.chat-message',
-            '.model-response'
+            'div.ds-markdown.ds-markdown--block',
+            'div.ds-markdown',
         ]
 
     def find_spinner(self) -> list[str]:
+        # DeepSeek has no dedicated spinner element in the DOM.
+        # During generation the send button is in its non-disabled active state
+        # (the icon swaps to a stop square).  We detect "still generating" by
+        # checking that at least one ds-markdown block exists but the send
+        # button has NOT returned to --disabled yet.  Callers should adapt;
+        # this list is kept for legacy compat — none of these match in practice.
         return [
-            'div[class*="loadingSpinner"]',
-            '.loading-spinner',
-            '.generating'
+            'div.ds-button--circle:not(.ds-button--disabled)',
         ]
 
     def find_image_results(self) -> list[str]:

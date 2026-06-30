@@ -216,6 +216,14 @@ async def capture_dom():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post('/browser/eval')
+async def eval_js(script: str = Body(..., embed=True)):
+    try:
+        result = await engine._page.evaluate(script)
+        return {'result': result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get('/browser/account')
 async def get_account():
     try:

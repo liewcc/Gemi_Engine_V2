@@ -63,33 +63,62 @@ class DeepSeekSequences(ProviderAdapter):
 
         logger.debug("Waiting for DeepSeek response...")
         start_time = asyncio.get_event_loop().time()
-        
-        # Wait up to 5s for generation to start
-        await asyncio.sleep(1.0)
-        
+
+        # ── Selectors ────────────────────────────────────────────────────────
+        # "Generating" state  : send/stop circle button does NOT have --disabled
+        # "Done"       state  : send button regains ds-button--disabled class
+        # We use Playwright's has() / class-attribute check via evaluate().
+        GENERATING_SEL = "div.ds-button--circle:not(.ds-button--disabled)"
+        DONE_SEL       = "div.ds-button.ds-button--primary.ds-button--filled.ds-button--circle.ds-button--disabled"
+
+        # ── Phase 1: wait for generation to START (up to 8 s) ────────────────
+        generation_started = False
+        phase1_deadline = start_time + 8.0
+        await asyncio.sleep(0.5)
+        while asyncio.get_event_loop().time() < phase1_deadline:
+            if self._e._stop_automation_event.is_set():
+                await self.stop_response()
+                return {"status": "stopped", "message": "Monitoring interrupted"}
+            try:
+                count = await self._e._page.locator(GENERATING_SEL).count()
+                if count > 0:
+                    generation_started = True
+                    logger.debug("DeepSeek: generation started (send button active)")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+
+        if not generation_started:
+            # Possibly a very fast response or the button never left disabled state;
+            # fall through and attempt to read whatever is on the page.
+            logger.debug("DeepSeek: generation start not detected — checking for existing response")
+
+        # ── Phase 2: wait for generation to FINISH ────────────────────────────
+        # Done when the send button is disabled again (textarea is empty-idle state)
+        # OR a ds-markdown--block container exists and the active button is gone.
         while asyncio.get_event_loop().time() - start_time < timeout:
             if self._e._stop_automation_event.is_set():
                 await self.stop_response()
                 return {"status": "stopped", "message": "Monitoring interrupted"}
 
-            # Check if loading spinner/generating indicator is visible
-            spinner_visible = False
-            for sel in self._dom.find_spinner():
-                try:
-                    if await self._e._page.locator(sel).first.is_visible(timeout=1000):
-                        spinner_visible = True
-                        break
-                except Exception:
-                    continue
-            
-            if not spinner_visible:
-                # Generation complete! Get last response text.
-                resp = await self.get_last_response()
-                if resp.get("text"):
-                    return {"status": "done", "has_image": False, "text": resp["text"]}
-            
-            await asyncio.sleep(1.5)
-            
+            try:
+                # Primary signal: send button has re-acquired --disabled (generation done)
+                done_count = await self._e._page.locator(DONE_SEL).count()
+                still_generating = await self._e._page.locator(GENERATING_SEL).count()
+
+                if done_count > 0 or still_generating == 0:
+                    # Confirm there is actually a response to read
+                    resp = await self.get_last_response()
+                    if resp.get("text"):
+                        logger.debug("DeepSeek: generation complete, response captured")
+                        return {"status": "done", "has_image": False, "text": resp["text"]}
+                    # Button disabled but no text yet — brief render lag, keep polling
+            except Exception as exc:
+                logger.warning("wait_for_response poll error: %s", exc)
+
+            await asyncio.sleep(1.0)
+
         return {"status": "timeout", "message": "Timed out waiting for response"}
 
     async def get_last_response(self) -> dict:
