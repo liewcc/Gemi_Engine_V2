@@ -484,15 +484,12 @@ class GeminiSequences(ProviderAdapter):
 
                     if (hasImg) return { status: "success", text: respText };
 
-                    // Structural and Textual refusal detection:
-                    // Gemini refused if the response is "complete" (has the complete footer class)
-                    // and it has text content but NO image, OR if it matches known refusal text.
-                    const completeFooter = lastResp.querySelector('.response-footer.complete');
-                    // Refusal keywords loaded from refused_keywords.json via args.refused
+                    // Refusal detection: keyword-only. completeFooter just means generation
+                    // finished — it is NOT a refusal signal for text-only responses.
                     const refusalKws = args.refused || [];
                     const isTextRefusal = refusalKws.some(kw => respText.toLowerCase().includes(kw.toLowerCase()));
 
-                    if ((completeFooter || isTextRefusal) && respText.length > 0) {
+                    if (isTextRefusal && respText.length > 0) {
                         return { status: "refused", text: respText };
                     }
 
@@ -545,26 +542,24 @@ class GeminiSequences(ProviderAdapter):
 
             if status == "success":
                 logger.debug("Response successful: Image detected.")
-                return {"status": "success", "message": "Image generated successfully."}
+                return {'status': 'done', 'has_image': True, 'text': resp_text}
             elif status == "quota_exceeded":
                 logger.debug(f"Response failed: Quota exceeded.")
                 return {"status": "error", "message": "Quota exceeded. Please wait before retrying."}
             elif status == "refused":
-                flat_text = " ".join(resp_text.replace('\n', ' ').split())
-                logger.debug(f"Response failed (Refused): {flat_text[:300]}")
-                return {"status": "refused", "message": f"Gemini refused: {flat_text[:300]}"}
+                return {'status': 'done', 'has_image': False, 'text': resp_text, 'refused': True}
             elif status == "idle_no_img":
+                if resp_text:
+                    logger.debug("Idle with text — completed text response.")
+                    return {'status': 'done', 'has_image': False, 'text': resp_text}
                 if not idle_start_time:
                     idle_start_time = current_time
-
-                # Only report 'stopped' after sustained generation (4s grace period)
                 if has_started_generating and start_gen_time and (current_time - start_gen_time > 4.0):
                     logger.debug(f"Idle detected after {current_time - start_gen_time:.1f}s of generation.")
                     return {"status": "error", "message": "Stopped or failed to generate image."}
                 elif (current_time - idle_start_time) > 8.0:
-                    logger.debug("Sustained idle detected without image. Treating as refusal.")
-                    flat_text = " ".join(resp_text.replace('\n', ' ').split())
-                    return {"status": "refused", "message": f"Gemini refused (Sustained Idle): {flat_text[:300]}"}
+                    logger.debug("Sustained idle with no image and no text.")
+                    return {"status": "error", "message": "Sustained idle with no image and no text."}
                 else:
                     logger.debug("Idle detected - in grace period, continuing to monitor...")
             elif status == "reset":
@@ -1517,8 +1512,8 @@ class GeminiSequences(ProviderAdapter):
             from processing_utils import save_with_metadata
         except ModuleNotFoundError:
             import sys
-            from config_utils import get_project_root
-            project_core = os.path.join(get_project_root(), os.getenv("BROWSER_ENGINE_DATA_SUBDIR", "core"))
+            from config_utils import get_root
+            project_core = os.path.join(get_root(), os.getenv("BROWSER_ENGINE_DATA_SUBDIR", "core"))
             if project_core not in sys.path:
                 sys.path.insert(0, project_core)
             from processing_utils import save_with_metadata
@@ -2655,8 +2650,7 @@ class GeminiSequences(ProviderAdapter):
                 const cn = last.querySelector(".model-response-text") || last.querySelector(".message-content") || last;
                 const respText = cn.innerText.trim();
                 const refusalKws = args.refused || [];
-                const complete = !!last.querySelector(".response-footer.complete");
-                if ((complete || refusalKws.some(kw => respText.toLowerCase().includes(kw.toLowerCase()))) && respText)
+                if (refusalKws.some(kw => respText.toLowerCase().includes(kw.toLowerCase())) && respText)
                     return { status: "refused", text: respText };
 
                 return { status: "idle_no_img", text: respText };
@@ -2677,20 +2671,21 @@ class GeminiSequences(ProviderAdapter):
                     has_started = True
                     start_gen_time = now
             elif status == 'success':
-                return {'status': 'success', 'message': 'Image generated successfully.'}
+                return {'status': 'done', 'has_image': True, 'text': text}
             elif status == 'quota_exceeded':
                 return {'status': 'error', 'message': 'Quota exceeded. Please wait before retrying.'}
             elif status == 'refused':
-                flat = ' '.join(text.replace('\n', ' ').split())
-                return {'status': 'refused', 'message': f'Gemini refused: {flat[:300]}'}
+                return {'status': 'done', 'has_image': False, 'text': text, 'refused': True}
             elif status == 'idle_no_img':
+                if text:
+                    logger.debug('Idle with text — completed text response.')
+                    return {'status': 'done', 'has_image': False, 'text': text}
                 if not idle_start:
                     idle_start = now
                 if has_started and start_gen_time and (now - start_gen_time > 4.0):
                     return {'status': 'error', 'message': 'Stopped or failed to generate image.'}
                 if (now - idle_start) > 8.0:
-                    flat = ' '.join(text.replace('\n', ' ').split())
-                    return {'status': 'refused', 'message': f'Gemini refused (sustained idle): {flat[:300]}'}
+                    return {'status': 'error', 'message': 'Sustained idle with no image and no text.'}
             elif status == 'reset':
                 if has_started:
                     return {'status': 'error', 'message': 'Gemini page reset unexpectedly during generation.'}

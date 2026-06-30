@@ -1,10 +1,11 @@
 import json
 import os
 
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'config.json')
+_CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config.json'))
 
 _DEFAULTS = {
     'headless': True,
+    'auto_launch': False,
     'active_profile': None,
     'active_user': '',
     'active_service': 'gemini',

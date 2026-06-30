@@ -109,21 +109,31 @@ async def stop_engine():
         logger.error('stop_engine: %s', e)
         raise HTTPException(status_code=500, detail=str(e))
 
+class RegistrationRequest(BaseModel):
+    profile_name: Optional[str] = None  # None = auto-pick next slot (Create), set = use existing (Rebuild)
+
 @app.post('/engine/start_registration')
-async def start_registration():
-    """Start a headed browser for manual account registration."""
+async def start_registration(req: RegistrationRequest = RegistrationRequest()):
+    """Start a separate headed browser directly on browser_user_data/ for manual account
+    registration or re-login. No sandbox — data written directly to the Profile directory.
+    - profile_name=None (default): auto-picks next unused Profile N slot (Create New Profile)
+    - profile_name='Profile N': opens that specific existing profile (Rebuild Profile)"""
     try:
-        await engine.start(headless=False, profile_name=None)
-        return {'status': 'success', 'message': 'Registration browser started'}
+        profile = await engine.start_registration(profile_name=req.profile_name)
+        return {'status': 'success', 'profile': profile,
+                'message': f'Registration browser started on {profile}. Please sign in to Google, then close the browser.'}
     except Exception as e:
+        logger.error('start_registration: %s', e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/stop_registration')
 async def stop_registration():
+    """Close the registration browser."""
     try:
-        await engine.stop()
+        await engine.stop_registration()
         return {'status': 'success'}
     except Exception as e:
+        logger.error('stop_registration: %s', e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/engine/logs')

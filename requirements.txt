@@ -4,3 +4,4 @@ uvicorn[standard]
 httpx
 pillow
 python-multipart
+psutil
