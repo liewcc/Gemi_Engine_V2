@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 from providers.gemini.sequences import GeminiSequences
 from providers.deepseek.sequences import DeepSeekSequences
 from providers.copilot.sequences import CopilotSequences
+from providers.zai.sequences import ZaiSequences
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,14 @@ class BrowserEngine:
         'gemini': 'https://gemini.google.com/app',
         'deepseek': 'https://chat.deepseek.com',
         'copilot': 'https://copilot.microsoft.com',
+        'zai': 'https://chat.z.ai/',
     }
 
     _PROVIDER_REGISTRY = {
         'gemini': GeminiSequences,
         'deepseek': DeepSeekSequences,
         'copilot': CopilotSequences,
+        'zai': ZaiSequences,
     }
 
     @property
