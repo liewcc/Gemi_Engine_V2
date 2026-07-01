@@ -77,11 +77,18 @@ class DeleteHistoryRequest(BaseModel):
 # ── Engine Management ──────────────────────────────────────────────────────────
 @app.get('/health')
 async def health():
+    if getattr(engine, '_reg_chrome_proc', None) is not None and engine._reg_chrome_proc.poll() is not None:
+        try:
+            await engine.stop_registration()
+        except Exception:
+            pass
     return {
         'status': 'ok',
         'engine_running': engine.is_running,
         'browser_pids': engine.browser_pids,
         'service_pid': os.getpid(),
+        'headless': getattr(engine, 'headless', False),
+        'active_profile': getattr(engine, 'active_profile', None),
     }
 
 @app.get('/browser/status')
@@ -90,15 +97,25 @@ async def browser_status():
         'engine_running': engine.is_running,
         'url': engine._page.url if engine._page else None,
         'browser_pids': engine.browser_pids,
+        'headless': getattr(engine, 'headless', False),
+        'active_profile': getattr(engine, 'active_profile', None),
     }
+
+@app.get('/browser/tabs')
+async def get_browser_tabs():
+    try:
+        return await engine.get_tabs()
+    except Exception as e:
+        logger.error('get_browser_tabs: %s', e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/start')
 async def start_engine(req: StartRequest):
     if engine.is_running:
         return {'status': 'already_running'}
     try:
+        headless = req.headless if req.headless is not None else True
         cfg = config_utils.load_config()
-        headless = req.headless if req.headless is not None else cfg.get('headless', True)
         profile_name = req.profile_name or cfg.get('active_profile')
         await engine.start(headless=headless, profile_name=profile_name)
         return {'status': 'success', 'message': f'Engine started (headless={headless})'}
@@ -178,6 +195,11 @@ async def re_login():
 
 @app.get('/engine/profiles')
 async def get_profiles():
+    if getattr(engine, '_reg_chrome_proc', None) is not None and engine._reg_chrome_proc.poll() is not None:
+        try:
+            await engine.stop_registration()
+        except Exception:
+            pass
     return {'profiles': engine.get_profiles()}
 
 @app.get('/engine/profiles/status')
@@ -365,6 +387,24 @@ async def delete_history(req: DeleteHistoryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get('/browser/screenshot')
+async def browser_screenshot(path: str = Query('screenshot.png')):
+    try:
+        await engine._page.screenshot(path=path)
+        return {'status': 'success', 'path': path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/browser/click')
+async def browser_click(x: int = Query(...), y: int = Query(...)):
+    try:
+        await engine._page.mouse.click(x, y)
+        return {'status': 'success'}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ── Entry Point ────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    uvicorn.run(app, host='127.0.0.1', port=18800)
+    cfg = config_utils.load_config()
+    port = int(cfg.get('port', 18900))
+    uvicorn.run(app, host='127.0.0.1', port=port)

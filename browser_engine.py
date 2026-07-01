@@ -79,6 +79,8 @@ class BrowserEngine:
         self._providers = {}
         self._sandbox_dir = None
         self._data_dir = os.path.join(os.path.dirname(__file__), 'browser_user_data')
+        self.headless = False
+        self.active_profile = None
         # Registration browser handles (separate Playwright instance, no sandbox)
         self._reg_playwright = None
         self._reg_context = None
@@ -122,10 +124,13 @@ class BrowserEngine:
             args=[
                 '--no-first-run',
                 '--no-default-browser-check',
-                '--profile-directory=Default'
+                '--profile-directory=Default',
+                '--disable-blink-features=AutomationControlled',
             ],
         )
         self.browser_pids = [self._browser.process.pid] if hasattr(self._browser, 'process') and self._browser.process else []
+        self.headless = headless
+        self.active_profile = profile_name
 
         # Instantiate all providers
         self._providers = {
@@ -134,6 +139,7 @@ class BrowserEngine:
 
         # Open one tab per provider and navigate in parallel
         import asyncio
+        _stealth_script = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         provider_names = list(self._PROVIDER_REGISTRY.keys())
         existing_pages = self._browser.pages
         for i, name in enumerate(provider_names):
@@ -141,11 +147,17 @@ class BrowserEngine:
                 page = existing_pages[0] if existing_pages else await self._browser.new_page()
             else:
                 page = await self._browser.new_page()
+            await page.add_init_script(_stealth_script)
             self._pages[name] = page
-        await asyncio.gather(*[
-            self._pages[name].goto(self.BASE_URLS[name], wait_until='domcontentloaded')
-            for name in provider_names
-        ])
+        async def _navigate(name):
+            page = self._pages[name]
+            url = self.BASE_URLS[name]
+            # Use JS navigation to avoid CDP-level automation signals that trigger Cloudflare
+            await page.goto('about:blank', wait_until='commit')
+            await page.evaluate(f"window.location.href = '{url}'")
+            await page.wait_for_load_state('domcontentloaded')
+
+        await asyncio.gather(*[_navigate(name) for name in provider_names])
 
         self.is_running = True
         logger.info("engine started headless=%s profile=%s", headless, profile_name)
@@ -167,6 +179,8 @@ class BrowserEngine:
             self._providers = {}
             self.is_running = False
             self.browser_pids = []
+            self.headless = False
+            self.active_profile = None
             logger.info("engine stopped")
 
     async def _cleanup_sandbox(self):
@@ -304,42 +318,61 @@ class BrowserEngine:
                 bypass_csp=True,
             )
 
+        if self._reg_context:
+            self._reg_context.on("close", lambda ctx: self._on_reg_context_close())
+
         logger.info('start_registration: browser started on %s', next_profile)
         return next_profile
 
+    def _on_reg_context_close(self):
+        logger.info("Registration browser context closed.")
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(self.stop_registration())
+        except RuntimeError:
+            pass
+
     async def stop_registration(self):
         """Closes the registration browser if it is open."""
-        if self._reg_context:
-            try:
-                await self._reg_context.close()
-            except Exception as e:
-                logger.warning('stop_registration: close error: %s', e)
-            self._reg_context = None
-        if hasattr(self, '_reg_browser') and self._reg_browser:
-            try:
-                await self._reg_browser.close()
-            except Exception:
-                pass
-            self._reg_browser = None
-        if self._reg_playwright:
-            try:
-                import asyncio
-                await asyncio.wait_for(self._reg_playwright.stop(), timeout=5.0)
-            except Exception as e:
-                logger.warning('stop_registration: stop error: %s', e)
-            self._reg_playwright = None
-        
-        # Kill the child subprocess if we launched Chrome directly
-        if hasattr(self, '_reg_chrome_proc') and self._reg_chrome_proc:
-            try:
-                pid = self._reg_chrome_proc.pid
-                if os.name == 'nt':
-                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
-                else:
-                    self._reg_chrome_proc.terminate()
-            except Exception as e:
-                logger.warning('stop_registration: failed to kill chrome process tree: %s', e)
-            self._reg_chrome_proc = None
+        if getattr(self, '_stopping_registration', False):
+            return
+        self._stopping_registration = True
+        try:
+            if self._reg_context:
+                try:
+                    await self._reg_context.close()
+                except Exception as e:
+                    logger.warning('stop_registration: close error: %s', e)
+                self._reg_context = None
+            if hasattr(self, '_reg_browser') and self._reg_browser:
+                try:
+                    await self._reg_browser.close()
+                except Exception:
+                    pass
+                self._reg_browser = None
+            if self._reg_playwright:
+                try:
+                    import asyncio
+                    await asyncio.wait_for(self._reg_playwright.stop(), timeout=5.0)
+                except Exception as e:
+                    logger.warning('stop_registration: stop error: %s', e)
+                self._reg_playwright = None
+            
+            # Kill the child subprocess if we launched Chrome directly
+            if hasattr(self, '_reg_chrome_proc') and self._reg_chrome_proc:
+                try:
+                    pid = self._reg_chrome_proc.pid
+                    if os.name == 'nt':
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
+                    else:
+                        self._reg_chrome_proc.terminate()
+                except Exception as e:
+                    logger.warning('stop_registration: failed to kill chrome process tree: %s', e)
+                self._reg_chrome_proc = None
+        finally:
+            self._stopping_registration = False
 
         logger.info('stop_registration: done')
 
@@ -353,14 +386,102 @@ class BrowserEngine:
         if service not in self._PROVIDER_REGISTRY:
             raise ValueError(f"Unknown service: {service}")
         self._active_service = service
+        page = self._pages.get(service)
+        if page:
+            await page.bring_to_front()
         logger.info("switched service to %s", service)
 
     # ── Account / Profile ──────────────────────────────────────────────────────
+
+    def _cleanup_empty_profiles(self):
+        """Delete any empty/leftover Chrome profiles that have no email and are named 'Person *' or are empty."""
+        # Check if browser or registration browser is running
+        if self._browser is not None:
+            return
+        if self._reg_context is not None:
+            return
+        reg_proc = getattr(self, '_reg_chrome_proc', None)
+        if reg_proc is not None and reg_proc.poll() is None:
+            # Subprocess is still running
+            return
+
+        local_state_path = os.path.join(os.path.abspath(self._data_dir), 'Local State')
+        if not os.path.exists(local_state_path):
+            return
+
+        try:
+            with open(local_state_path, 'r', encoding='utf-8') as f:
+                local_state = json.load(f)
+        except Exception:
+            return
+
+        profile_data = local_state.get('profile', {})
+        info_cache = profile_data.get('info_cache', {})
+        if not info_cache:
+            return
+
+        to_delete = []
+        for d, info in info_cache.items():
+            if not d.startswith('Profile '):
+                continue
+            email = info.get('user_name', '').strip()
+            if not email:
+                to_delete.append(d)
+
+        if not to_delete:
+            return
+
+        # Delete from disk
+        for profile_name in to_delete:
+            profile_path = os.path.join(os.path.abspath(self._data_dir), profile_name)
+            if os.path.exists(profile_path):
+                try:
+                    shutil.rmtree(profile_path, ignore_errors=True)
+                except Exception:
+                    pass
+
+        # Update Local State
+        modified = False
+        if 'profile' in local_state:
+            profile = local_state['profile']
+            if 'info_cache' in profile:
+                for profile_name in to_delete:
+                    if profile_name in profile['info_cache']:
+                        del profile['info_cache'][profile_name]
+                        modified = True
+            if 'profiles_order' in profile:
+                orig_len = len(profile['profiles_order'])
+                profile['profiles_order'] = [p for p in profile['profiles_order'] if p not in to_delete]
+                if len(profile['profiles_order']) != orig_len:
+                    modified = True
+            if 'last_active_profiles' in profile:
+                orig_len = len(profile['last_active_profiles'])
+                profile['last_active_profiles'] = [p for p in profile['last_active_profiles'] if p not in to_delete]
+                if len(profile['last_active_profiles']) != orig_len:
+                    modified = True
+            if profile.get('last_used') in to_delete:
+                profile['last_used'] = profile['profiles_order'][0] if profile.get('profiles_order') else ''
+                modified = True
+
+        if 'variations_google_groups' in local_state:
+            for profile_name in to_delete:
+                if profile_name in local_state['variations_google_groups']:
+                    del local_state['variations_google_groups'][profile_name]
+                    modified = True
+
+        if modified:
+            try:
+                with open(local_state_path, 'w', encoding='utf-8') as f:
+                    json.dump(local_state, f, separators=(',', ':'))
+            except Exception:
+                pass
 
     def repack_profile_ids(self):
         """Repack profile folders on disk and in Local State so their numbering is continuous."""
         if self.is_running:
             raise RuntimeError("Cannot repack profiles while browser is running")
+            
+        self._cleanup_empty_profiles()
             
         profiles_path = os.path.abspath(self._data_dir)
         if not os.path.exists(profiles_path):
@@ -611,15 +732,20 @@ class BrowserEngine:
 
     def get_profiles(self) -> list:
         """Return all Chrome profiles with email and display name."""
+        self._cleanup_empty_profiles()
         cache = self._load_profile_cache()
-        items = [
-            {
+        items = []
+        for d, info in cache.items():
+            email = info.get('user_name', '').strip()
+            name = (info.get('gaia_name') or info.get('name', '')).strip()
+            # Filter out profiles that have no email
+            if not email:
+                continue
+            items.append({
                 'dir': d,
-                'email': info.get('user_name', ''),
-                'name': info.get('gaia_name') or info.get('name', ''),
-            }
-            for d, info in cache.items()
-        ]
+                'email': email,
+                'name': name,
+            })
 
         def profile_key(item):
             directory = item.get('dir', '')
@@ -693,3 +819,36 @@ class BrowserEngine:
 
     async def get_account_info(self) -> dict:
         return await self._get_provider().get_account_info()
+
+    async def get_tabs(self) -> dict:
+        if not self.is_running or not self._browser:
+            return {"tabs": [], "active_service": self._active_service}
+
+        tabs_info = []
+        for index, page in enumerate(self._browser.pages):
+            try:
+                title = await page.title()
+            except Exception:
+                title = "Untitled"
+
+            # Check if this page corresponds to any known service tab
+            associated_service = None
+            for service_name, service_page in self._pages.items():
+                if service_page == page:
+                    associated_service = service_name
+                    break
+
+            is_active = (associated_service == self._active_service) if associated_service else False
+
+            tabs_info.append({
+                "index": index,
+                "title": title,
+                "url": page.url,
+                "service": associated_service,
+                "is_active": is_active
+            })
+
+        return {
+            "tabs": tabs_info,
+            "active_service": self._active_service
+        }

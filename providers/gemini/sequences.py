@@ -23,6 +23,7 @@ class GeminiSequences(ProviderAdapter):
     def __init__(self, engine):
         self._e = engine
         self._dom = GeminiDOM()
+        self._caps = {}
 
     async def send_prompt(self, text):
         """Types text into Gemini's prompt area and sends it."""
@@ -910,8 +911,10 @@ class GeminiSequences(ProviderAdapter):
             pass
         return False
 
-    async def apply_settings(self, model_name=None, tool_name=None, thinking_level=None):
+    async def apply_settings(self, model=None, tool=None, sub_tool=None, thinking_level=None):
         """Applies model, thinking level, and/or tool to the Gemini UI."""
+        model_name = model
+        tool_name = tool
         if not self._e.is_running:
             return {"status": "error", "message": "Browser not started"}
 
