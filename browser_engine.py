@@ -93,6 +93,8 @@ class BrowserEngine:
 
     async def start(self, headless: bool = True, profile_name: str = None):
         """Launch Chrome via Playwright CDP with optional profile sandbox."""
+        if self._reg_context is not None:
+            raise Exception("Registration browser is currently open. Close it before starting the main browser.")
         source_user_data = os.path.abspath(self._data_dir)
         sandbox_path = os.path.join(os.path.dirname(source_user_data), 'browser_session_sandbox')
 
@@ -202,6 +204,8 @@ class BrowserEngine:
         - profile_name=None: auto-picks the next unused Profile N slot (Create New Profile)
         - profile_name='Profile N': opens that specific profile (Rebuild / Re-login)
         """
+        if self.is_running:
+            raise Exception("Main browser is running. Stop it first before opening the registration browser.")
         await self.stop_registration()
 
         user_data_dir = self._data_dir  # e.g. .../browser_user_data

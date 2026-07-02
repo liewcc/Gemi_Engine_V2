@@ -163,6 +163,7 @@ async def health():
         'headless': getattr(engine, 'headless', False),
         'active_profile': getattr(engine, 'active_profile', None),
         'tui_attached': _tui_alive(),
+        'registration_active': getattr(engine, '_reg_context', None) is not None,
     }
 
 @app.get('/browser/status')
@@ -173,6 +174,7 @@ async def browser_status():
         'browser_pids': engine.browser_pids,
         'headless': getattr(engine, 'headless', False),
         'active_profile': getattr(engine, 'active_profile', None),
+        'registration_active': getattr(engine, '_reg_context', None) is not None,
     }
 
 @app.get('/browser/tabs')
