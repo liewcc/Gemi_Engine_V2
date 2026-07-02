@@ -16,6 +16,11 @@ _DEFAULTS = {
 def load_engine_config() -> dict:
     defaults = {'port': 18900, 'idle_timeout_minutes': 15, 'idle_timeout_enabled': True}
     if not os.path.exists(_ENGINE_CONFIG_PATH):
+        try:
+            with open(_ENGINE_CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump(defaults, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
         return dict(defaults)
     with open(_ENGINE_CONFIG_PATH, encoding='utf-8') as f:
         data = json.load(f)
