@@ -80,11 +80,14 @@ class BrowserEngine:
         self._providers = {}
         self._sandbox_dir = None
         self._data_dir = os.path.join(os.path.dirname(__file__), 'browser_user_data')
+        self._staging_dir = os.path.join(os.path.dirname(__file__), 'registration_staging')
         self.headless = False
         self.active_profile = None
         # Registration browser handles (separate Playwright instance, no sandbox)
         self._reg_playwright = None
         self._reg_context = None
+        self._reg_is_new_profile = False
+        self._last_registration_result = None
         # ponytail: never-set event; providers check this to abort wait loops
         import asyncio as _asyncio
         self._stop_automation_event = _asyncio.Event()
@@ -197,56 +200,38 @@ class BrowserEngine:
 
     async def start_registration(self, profile_name: str = None):
         """
-        Opens a headed browser directly on browser_user_data/ (NO sandbox) for manual
-        account registration or re-login.  Mirrors V1's start_registration() exactly:
-        - Ignores automation-detection args so Google allows sign-in
-        - Writes all data directly to the real profile directory (no sandbox cleanup)
-        - profile_name=None: auto-picks the next unused Profile N slot (Create New Profile)
-        - profile_name='Profile N': opens that specific profile (Rebuild / Re-login)
+        Opens a headed browser for manual account registration or re-login.
+        - profile_name='Profile N': Rebuild / Re-login. Unchanged — opens that specific
+          existing profile directly on the real browser_user_data/ (no sandbox).
+        - profile_name=None: Create New Profile. Logs in inside an isolated staging
+          directory (registration_staging/) that never touches browser_user_data/ or
+          its Local State. The real 'Profile N' slot is only computed and committed
+          (see _finalize_new_profile_registration, called from stop_registration)
+          once the browser is closed AND a real login was actually detected. This
+          avoids reserving a slot before knowing whether login happened, and avoids
+          the staging Chrome process ever sharing a singleton lock / Local State with
+          any other already-running Chrome instance on this machine.
         """
         if self.is_running:
             raise Exception("Main browser is running. Stop it first before opening the registration browser.")
         await self.stop_registration()
-
-        user_data_dir = self._data_dir  # e.g. .../browser_user_data
+        self._last_registration_result = None
 
         if profile_name:
-            # Rebuild / Re-login: use the specified existing profile
+            # Rebuild / Re-login: use the specified existing profile, directly on the real dir.
+            user_data_dir = self._data_dir
             next_profile = profile_name
+            self._reg_is_new_profile = False
         else:
-            # Create New Profile: pick the next available slot
-            next_profile = 'Profile 1'
-            local_state_path = os.path.join(user_data_dir, 'Local State')
-            if os.path.exists(local_state_path):
-                try:
-                    import json as _json
-                    with open(local_state_path, 'r', encoding='utf-8') as f:
-                        state = _json.load(f)
-                    keys = state.get('profile', {}).get('info_cache', {}).keys()
-                    nums = [int(k.split()[-1]) for k in keys
-                            if k.startswith('Profile ') and k.split()[-1].isdigit()]
-                    next_num = (max(nums) + 1) if nums else 1
-                    next_profile = f'Profile {next_num}'
-                except Exception as e:
-                    logger.warning('start_registration: could not parse Local State, using Profile 1: %s', e)
+            # Create New Profile: fresh isolated staging dir, wiped before each attempt.
+            if os.path.exists(self._staging_dir):
+                shutil.rmtree(self._staging_dir, ignore_errors=True)
+            os.makedirs(self._staging_dir, exist_ok=True)
+            user_data_dir = self._staging_dir
+            next_profile = 'Default'
+            self._reg_is_new_profile = True
 
-            # Also cross-check disk dirs in case Local State is out of date
-            try:
-                disk_nums = []
-                for d in os.listdir(user_data_dir):
-                    import re as _re
-                    m = _re.match(r'^Profile (\d+)$', d)
-                    if m and os.path.isdir(os.path.join(user_data_dir, d)):
-                        disk_nums.append(int(m.group(1)))
-                if disk_nums:
-                    disk_next = max(disk_nums) + 1
-                    current_next = int(next_profile.split()[-1])
-                    if disk_next > current_next:
-                        next_profile = f'Profile {disk_next}'
-            except Exception:
-                pass
-
-        logger.info('start_registration: opening browser on %s', next_profile)
+        logger.info('start_registration: opening browser on %s (dir=%s)', next_profile, user_data_dir)
 
         # Look for official Google Chrome installation to bypass Google's automation bot checks
         chrome_exe = None
@@ -328,7 +313,10 @@ class BrowserEngine:
             self._reg_context.on("close", lambda ctx: self._on_reg_context_close())
 
         logger.info('start_registration: browser started on %s', next_profile)
-        return next_profile
+        # For Create New Profile the real slot isn't known until commit time (see
+        # _finalize_new_profile_registration) — return None so callers don't display
+        # a name that may turn out wrong.
+        return None if self._reg_is_new_profile else next_profile
 
     def _on_reg_context_close(self):
         logger.info("Registration browser context closed.")
@@ -377,10 +365,125 @@ class BrowserEngine:
                 except Exception as e:
                     logger.warning('stop_registration: failed to kill chrome process tree: %s', e)
                 self._reg_chrome_proc = None
+
+            # Now that the browser process is fully torn down and files are unlocked,
+            # commit or discard a "Create New Profile" staging session (no-op for Rebuild).
+            if getattr(self, '_reg_is_new_profile', False):
+                await self._finalize_new_profile_registration()
         finally:
             self._stopping_registration = False
 
         logger.info('stop_registration: done')
+
+    def _compute_next_profile_slot(self) -> str:
+        """Scan Local State + disk in browser_user_data/ for the next unused 'Profile N'."""
+        user_data_dir = self._data_dir
+        next_profile = 'Profile 1'
+        local_state_path = os.path.join(user_data_dir, 'Local State')
+        if os.path.exists(local_state_path):
+            try:
+                with open(local_state_path, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                keys = state.get('profile', {}).get('info_cache', {}).keys()
+                nums = [int(k.split()[-1]) for k in keys
+                        if k.startswith('Profile ') and k.split()[-1].isdigit()]
+                next_num = (max(nums) + 1) if nums else 1
+                next_profile = f'Profile {next_num}'
+            except Exception as e:
+                logger.warning('_compute_next_profile_slot: could not parse Local State, using Profile 1: %s', e)
+
+        try:
+            disk_nums = []
+            for d in os.listdir(user_data_dir):
+                m = re.match(r'^Profile (\d+)$', d)
+                if m and os.path.isdir(os.path.join(user_data_dir, d)):
+                    disk_nums.append(int(m.group(1)))
+            if disk_nums:
+                disk_next = max(disk_nums) + 1
+                current_next = int(next_profile.split()[-1])
+                if disk_next > current_next:
+                    next_profile = f'Profile {disk_next}'
+        except Exception:
+            pass
+
+        return next_profile
+
+    async def _finalize_new_profile_registration(self):
+        """Commit or discard a Create New Profile staging session.
+
+        Detects a completed login via registration_staging/Default/Preferences'
+        `account_info` — populated by Chrome as soon as the user signs into a
+        Google account in ANY tab, regardless of whether they also opt into full
+        Chrome-account sync. (Local State's `profile.info_cache[...].user_name` was
+        tried first and rejected: it only gets set by the separate, optional
+        "turn on Chrome sync" step, so a real, fully-logged-in website session was
+        being misclassified as "no login" and discarded.)
+
+        If no account_info is found, the whole staging dir is discarded and
+        browser_user_data/ is never touched. If found, only now does this compute
+        the real target slot, build a real info_cache entry from the Preferences
+        data, merge it into the real Local State, and move the staged profile
+        folder into place.
+        """
+        result = {'status': 'discarded', 'profile': None}
+        try:
+            account = None
+            staging_prefs_path = os.path.join(self._staging_dir, 'Default', 'Preferences')
+            if os.path.exists(staging_prefs_path):
+                with open(staging_prefs_path, 'r', encoding='utf-8') as f:
+                    staged_prefs = json.load(f)
+                accounts = staged_prefs.get('account_info') or []
+                if accounts and accounts[0].get('email'):
+                    account = accounts[0]
+
+            if not account:
+                logger.info('_finalize_new_profile_registration: no login detected, discarding staging dir')
+            else:
+                next_profile = self._compute_next_profile_slot()
+                email = account.get('email', '')
+                full_name = account.get('full_name') or account.get('given_name') or ''
+                new_entry = {
+                    'user_name': email,
+                    'name': full_name or email,
+                    'gaia_name': full_name or email,
+                    'gaia_given_name': account.get('given_name', ''),
+                    'gaia_id': account.get('gaia', ''),
+                }
+
+                real_local_state_path = os.path.join(self._data_dir, 'Local State')
+                if os.path.exists(real_local_state_path):
+                    with open(real_local_state_path, 'r', encoding='utf-8') as f:
+                        real_state = json.load(f)
+                else:
+                    real_state = {}
+                real_profile_block = real_state.setdefault('profile', {})
+                real_info_cache = real_profile_block.setdefault('info_cache', {})
+                real_info_cache[next_profile] = new_entry
+                profiles_order = real_profile_block.setdefault('profiles_order', [])
+                if next_profile not in profiles_order:
+                    profiles_order.append(next_profile)
+                real_profile_block['last_used'] = next_profile
+                os.makedirs(self._data_dir, exist_ok=True)
+                with open(real_local_state_path, 'w', encoding='utf-8') as f:
+                    json.dump(real_state, f, separators=(',', ':'))
+
+                src_dir = os.path.join(self._staging_dir, 'Default')
+                dst_dir = os.path.join(self._data_dir, next_profile)
+                if os.path.exists(dst_dir):
+                    raise Exception(f'Target profile directory {next_profile} already exists')
+                shutil.move(src_dir, dst_dir)
+
+                result = {'status': 'success', 'profile': next_profile}
+                logger.info('_finalize_new_profile_registration: committed new profile as %s (%s)', next_profile, email)
+        except Exception as e:
+            logger.error('_finalize_new_profile_registration: %s', e)
+            result = {'status': 'error', 'profile': None, 'message': str(e)}
+        finally:
+            if os.path.exists(self._staging_dir):
+                shutil.rmtree(self._staging_dir, ignore_errors=True)
+            self._reg_is_new_profile = False
+            self._last_registration_result = result
+        return result
 
     # ── Provider / Service ─────────────────────────────────────────────────────
 

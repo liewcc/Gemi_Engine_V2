@@ -164,6 +164,7 @@ async def health():
         'active_profile': getattr(engine, 'active_profile', None),
         'tui_attached': _tui_alive(),
         'registration_active': getattr(engine, '_reg_context', None) is not None,
+        'last_registration_result': getattr(engine, '_last_registration_result', None),
     }
 
 @app.get('/browser/status')
@@ -219,14 +220,19 @@ class RegistrationRequest(BaseModel):
 @app.post('/engine/start_registration')
 @_locked
 async def start_registration(req: RegistrationRequest = RegistrationRequest()):
-    """Start a separate headed browser directly on browser_user_data/ for manual account
-    registration or re-login. No sandbox — data written directly to the Profile directory.
-    - profile_name=None (default): auto-picks next unused Profile N slot (Create New Profile)
-    - profile_name='Profile N': opens that specific existing profile (Rebuild Profile)"""
+    """Start a separate headed browser for manual account registration or re-login.
+    - profile_name=None (default): Create New Profile. Logs in inside an isolated
+      staging directory; the real Profile N slot is only assigned once the browser
+      is closed and a real login is confirmed (see GET /health's
+      last_registration_result). `profile` in this response is null.
+    - profile_name='Profile N': Rebuild Profile. Opens that specific existing
+      profile directly, no sandbox, no staging."""
     try:
         profile = await engine.start_registration(profile_name=req.profile_name)
-        return {'status': 'success', 'profile': profile,
-                'message': f'Registration browser started on {profile}. Please sign in to Google, then close the browser.'}
+        message = (f'Registration browser started on {profile}. Please sign in to Google, then close the browser.'
+                   if profile else
+                   'Registration browser started in an isolated staging area. Please sign in to Google, then close the browser.')
+        return {'status': 'success', 'profile': profile, 'message': message}
     except Exception as e:
         logger.error('start_registration: %s', e)
         raise HTTPException(status_code=500, detail=str(e))
