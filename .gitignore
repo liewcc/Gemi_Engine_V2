@@ -9,4 +9,6 @@ data/refused_keywords.json
 data/quota_full_keywords.json
 engine.log
 engine.log.*
+engine_err.log
+out.txt
 *.tmp
