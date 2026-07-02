@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from providers.base import ProviderAdapter
 from providers.zai.dom import ZaiDOM
@@ -48,13 +49,52 @@ class ZaiSequences(ProviderAdapter):
         return {"status": "filled", "prompt": text}
 
     async def attach_file(self, path: str):
-        return {"status": "ignored"}
+        """Upload a local file via z.ai's hidden file input.
+
+        button#upload-file-button opens an OS file picker Playwright can't
+        drive — instead this sets files directly on the <input type="file">
+        it proxies to, which is what set_input_files() is for.
+        """
+        if not self._e.is_running:
+            raise Exception("Browser Engine not started")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"attach_file: file not found: {path}")
+
+        file_input = self._e._page.locator(self._dom.find_file_input()[0]).first
+        await file_input.set_input_files(path)
+        await asyncio.sleep(1.0)
+        logger.debug("attach_file: uploaded %s", path)
 
     async def remove_file(self, path: str):
-        return {"status": "ignored"}
+        """Click the hover-reveal remove (x) button on the chip whose
+        filename stem matches `path`. The remove button is CSS-hidden until
+        the chip is hovered (group-hover:visible), so the click is forced
+        rather than hovering first.
+        """
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        chips = self._e._page.locator(self._dom.find_attachment_chips()[0])
+        count = await chips.count()
+        for i in range(count):
+            chip = chips.nth(i)
+            try:
+                name = (await chip.locator('.truncate').first.inner_text()).strip()
+            except Exception:
+                continue
+            if os.path.splitext(name)[0].lower() == stem:
+                await chip.locator('button').first.click(force=True)
+                await asyncio.sleep(0.5)
+                logger.debug("remove_file: removed %s", name)
+                return
+        logger.debug("remove_file: no attachment matched stem=%s", stem)
 
     async def get_current_attachments(self) -> list:
-        return []
+        try:
+            return await self._e._page.evaluate(
+                '''(sel) => Array.from(document.querySelectorAll(sel)).map(el => el.textContent.trim())''',
+                self._dom.find_attachment_list()[0],
+            )
+        except Exception:
+            return []
 
     async def submit(self):
         if not self._e.is_running:

@@ -6,6 +6,9 @@ class ZaiDOM:
 
     Confirmed selectors (from live DOM inspection):
       submit button: button#send-message-button (disabled when input empty)
+      file input: input[type="file"] — hidden, sits behind button#upload-file-button.
+        Only one on the page; set_input_files() targets it directly instead of
+        clicking the button (which would open an OS file picker Playwright can't drive).
     """
 
     def find_submit_button(self) -> list[str]:
@@ -68,7 +71,16 @@ class ZaiDOM:
         return []
 
     def find_attachment_list(self) -> list[str]:
-        return []
+        # Each chip is a <button> in the chip-scroll strip above the prompt
+        # input; filename text lives in the .truncate child.
+        return ['div.chip-scroll > button .truncate']
+
+    def find_attachment_chips(self) -> list[str]:
+        # Whole chip (icon + filename + hover-reveal remove button).
+        return ['div.chip-scroll > button']
+
+    def find_file_input(self) -> list[str]:
+        return ['input[type="file"]']
 
     def find_image_results(self) -> list[str]:
         return ['img']

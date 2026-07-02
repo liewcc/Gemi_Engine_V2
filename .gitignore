@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 browser_user_data/
 browser_session_sandbox/
+registration_staging/
+dom_dumps/
 data/config.json
 data/user_login_lookup.json
 data/refused_keywords.json
@@ -10,5 +12,7 @@ data/quota_full_keywords.json
 engine.log
 engine.log.*
 engine_err.log
+engine_manual_start.log
+data/session_health.jsonl
 out.txt
 *.tmp
