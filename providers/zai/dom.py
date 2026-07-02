@@ -46,16 +46,31 @@ class ZaiDOM:
 
     def find_response_container(self) -> list[str]:
         return [
+            '.chat-assistant:last-of-type #response-content-container > .markdown-prose',
             'div.chat-assistant',
             'div.markdown-prose',
         ]
 
+    def find_thinking_chain(self) -> list[str]:
+        # Reasoning/'Thought Process' block nested inside the same .markdown-prose container as the final answer — must be stripped out before reading response text, or it bleeds into the result.
+        return ['.thinking-chain-container']
+
+    def find_artifact_panel(self) -> list[str]:
+        # Right-side code/canvas preview panel z.ai opens for generated HTML/JS. Not read by any sequence yet — kept for future use.
+        return ['div[data-pane-state="expanded"] .artifactsContainer']
+
+    def find_artifact_iframe(self) -> list[str]:
+        # The live artifact/canvas panel's iframe — .srcdoc holds the complete generated HTML source, unlike the lazily-rendered 'code' tab UI which only has currently-scrolled lines in the DOM.
+        return ['div[data-pane-state="expanded"] .artifactsContainer iframe']
+
     def find_spinner(self) -> list[str]:
-        # z.ai: during generation the send button stays disabled; stop button appears
+        # z.ai: during generation the send button stays disabled; stop button appears;
+        # a 4-dot 'thinking' animation also renders in-message.
         return [
             'button#stop-message-button',
             'button[aria-label="Stop"]',
             'button[aria-label="Stop generating"]',
+            '.container.svelte-m0sfji .dot',
         ]
 
     def find_model_dropdown(self) -> list[str]:

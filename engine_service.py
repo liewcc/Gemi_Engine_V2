@@ -450,6 +450,14 @@ async def last_response():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get('/browser/artifact_code')
+@_locked
+async def artifact_code():
+    try:
+        return await engine.get_artifact_code()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post('/browser/stop')
 @_locked
 async def stop_response():

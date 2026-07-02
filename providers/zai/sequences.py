@@ -141,12 +141,41 @@ class ZaiSequences(ProviderAdapter):
                 loc = self._e._page.locator(sel)
                 count = await loc.count()
                 if count > 0:
-                    text = await loc.nth(count - 1).inner_text()
+                    text = await loc.nth(count - 1).evaluate(
+                        """(node, selector) => {
+                            const clone = node.cloneNode(true);
+                            const elements = clone.querySelectorAll(selector);
+                            elements.forEach(el => el.remove());
+                            return clone.innerText;
+                        }""",
+                        self._dom.find_thinking_chain()[0],
+                    )
                     if text.strip():
                         return {"text": text.strip(), "done": True}
         except Exception as e:
             logger.warning("get_last_response error: %s", e)
         return {"text": "", "done": True}
+
+    async def get_artifact_code(self) -> dict:
+        """Returns the full source of an open HTML artifact panel, if one is open.
+
+        z.ai only opens this panel for complete, browser-runnable HTML documents;
+        other languages (Python, JS snippets, React/JSX, etc.) never trigger it and
+        are already fully readable via get_last_response()'s normal text extraction.
+        """
+        if not self._e.is_running:
+            return {"status": "none", "code": None}
+        try:
+            for sel in self._dom.find_artifact_iframe():
+                loc = self._e._page.locator(sel)
+                count = await loc.count()
+                if count > 0:
+                    srcdoc = await loc.nth(count - 1).get_attribute("srcdoc")
+                    if srcdoc:
+                        return {"status": "success", "code": srcdoc}
+        except Exception as e:
+            logger.warning("get_artifact_code error: %s", e)
+        return {"status": "none", "code": None}
 
     async def stop_response(self):
         if not self._e.is_running:
