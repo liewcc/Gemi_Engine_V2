@@ -231,6 +231,17 @@ class BrowserEngine:
             next_profile = 'Default'
             self._reg_is_new_profile = True
 
+            # Seed staging with the real install's Local State (os_crypt key) so
+            # cookies/login data Chrome encrypts during this staged login stay
+            # decryptable once moved into browser_user_data/. Without this,
+            # Chrome generates a fresh random key for the empty staging dir; after
+            # commit, switch_account's sandbox copies the REAL Local State's
+            # (different) key, which can't decrypt this profile's session data —
+            # the newly created account then shows up signed out / empty.
+            real_local_state = os.path.join(self._data_dir, 'Local State')
+            if os.path.exists(real_local_state):
+                shutil.copy2(real_local_state, os.path.join(self._staging_dir, 'Local State'))
+
         logger.info('start_registration: opening browser on %s (dir=%s)', next_profile, user_data_dir)
 
         # Look for official Google Chrome installation to bypass Google's automation bot checks
@@ -456,6 +467,23 @@ class BrowserEngine:
                         real_state = json.load(f)
                 else:
                     real_state = {}
+
+                # Fallback for the very first profile ever created (no real Local
+                # State existed for start_registration to seed staging with): pull
+                # the os_crypt key staging generated for this login back into the
+                # real Local State, so it matches what actually encrypted this
+                # profile's cookies/login data.
+                if 'os_crypt' not in real_state:
+                    staged_local_state_path = os.path.join(self._staging_dir, 'Local State')
+                    if os.path.exists(staged_local_state_path):
+                        try:
+                            with open(staged_local_state_path, 'r', encoding='utf-8') as f:
+                                staged_state = json.load(f)
+                            if 'os_crypt' in staged_state:
+                                real_state['os_crypt'] = staged_state['os_crypt']
+                        except Exception:
+                            pass
+
                 real_profile_block = real_state.setdefault('profile', {})
                 real_info_cache = real_profile_block.setdefault('info_cache', {})
                 real_info_cache[next_profile] = new_entry
@@ -898,6 +926,12 @@ class BrowserEngine:
 
     async def get_last_response(self) -> dict:
         return await self._get_provider().get_last_response()
+
+    async def get_artifact_code(self) -> dict:
+        provider = self._get_provider()
+        if not hasattr(provider, 'get_artifact_code'):
+            return {"status": "unsupported", "code": None}
+        return await provider.get_artifact_code()
 
     async def stop_response(self):
         await self._get_provider().stop_response()
