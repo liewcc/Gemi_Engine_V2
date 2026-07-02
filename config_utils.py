@@ -2,6 +2,7 @@ import json
 import os
 
 _CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config.json'))
+_ENGINE_CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'engine_config.json'))
 
 _DEFAULTS = {
     'headless': True,
@@ -10,6 +11,15 @@ _DEFAULTS = {
     'active_user': '',
     'active_service': 'gemini',
 }
+
+
+def load_engine_config() -> dict:
+    defaults = {'port': 18900, 'idle_timeout_minutes': 15, 'idle_timeout_enabled': True}
+    if not os.path.exists(_ENGINE_CONFIG_PATH):
+        return dict(defaults)
+    with open(_ENGINE_CONFIG_PATH, encoding='utf-8') as f:
+        data = json.load(f)
+    return {**defaults, **data}
 
 
 def load_config() -> dict:

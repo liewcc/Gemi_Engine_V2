@@ -76,6 +76,7 @@ class BrowserEngine:
         self._browser = None
         self._playwright = None
         self._active_service = 'gemini'
+        self._discovery_cache = {}
         self._providers = {}
         self._sandbox_dir = None
         self._data_dir = os.path.join(os.path.dirname(__file__), 'browser_user_data')
@@ -177,6 +178,7 @@ class BrowserEngine:
             self._playwright = None
             self._pages = {}
             self._providers = {}
+            self._discovery_cache.clear()
             self.is_running = False
             self.browser_pids = []
             self.headless = False

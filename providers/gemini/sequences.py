@@ -1361,9 +1361,7 @@ class GeminiSequences(ProviderAdapter):
 
             # Persist discovered capabilities
             try:
-                cfg = load_config()
-                disc = cfg.get("discovery", {})
-                disc.update({
+                self._e._discovery_cache[self._e._active_service] = {
                     "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "current_model": results["current_model"],
                     "current_thinking_level": results["current_thinking_level"],
@@ -1371,8 +1369,7 @@ class GeminiSequences(ProviderAdapter):
                     "available_thinking_levels": results["thinking_levels"],
                     "available_tools": results["main_tools"],
                     "sub_tools": results["sub_tools"]
-                })
-                save_config({"discovery": disc})
+                }
                 logger.debug(
                     f"Discovery complete. "
                     f"Models: {results['models']}, "

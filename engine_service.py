@@ -2,6 +2,9 @@ import asyncio
 import logging
 import os
 import uvicorn
+import time
+import psutil
+import functools
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
@@ -28,6 +31,61 @@ if os.name == 'nt':
 app = FastAPI(title='Gemi Engine V2')
 engine = BrowserEngine()
 
+_browser_lock = asyncio.Lock()
+_last_activity = time.monotonic()
+_tui_pid: int | None = None
+_tui_create_time: float | None = None
+_idle_timeout_seconds: int = 15 * 60
+_idle_timeout_enabled: bool = True
+
+def _locked(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        async with _browser_lock:
+            return await fn(*args, **kwargs)
+    return wrapper
+
+@app.middleware("http")
+async def _track_activity(request, call_next):
+    global _last_activity
+    _last_activity = time.monotonic()
+    return await call_next(request)
+
+def _tui_alive() -> bool:
+    if _tui_pid is None:
+        return False
+    try:
+        proc = psutil.Process(_tui_pid)
+        return proc.create_time() == _tui_create_time
+    except psutil.NoSuchProcess:
+        return False
+
+async def _idle_watcher():
+    while True:
+        await asyncio.sleep(60)
+        if not _idle_timeout_enabled:
+            continue
+        if _tui_alive():
+            continue
+        if time.monotonic() - _last_activity < _idle_timeout_seconds:
+            continue
+        if _browser_lock.locked():
+            continue  # a browser operation is in flight — don't kill mid-request, try again next cycle
+        logger.warning("Idle timeout reached (no TUI attached) — shutting down engine service.")
+        try:
+            await engine.stop()
+        except Exception as e:
+            logger.error("idle shutdown: engine.stop failed: %s", e)
+        os._exit(0)
+
+@app.on_event("startup")
+async def _on_startup():
+    global _idle_timeout_seconds, _idle_timeout_enabled
+    cfg = config_utils.load_engine_config()
+    _idle_timeout_enabled = bool(cfg.get("idle_timeout_enabled", True))
+    _idle_timeout_seconds = int(cfg.get("idle_timeout_minutes", 15)) * 60
+    asyncio.create_task(_idle_watcher())
+
 
 async def _route_service(service: Optional[str]):
     """Switch active provider if service param is given and differs from current."""
@@ -38,6 +96,8 @@ async def _route_service(service: Optional[str]):
 class StartRequest(BaseModel):
     headless: bool = True
     profile_name: Optional[str] = None
+    active_user: Optional[str] = None
+    active_service: Optional[str] = None
 
 class SwitchAccountRequest(BaseModel):
     username: str
@@ -75,6 +135,19 @@ class DeleteHistoryRequest(BaseModel):
     range_name: str = 'Last hour'
 
 # ── Engine Management ──────────────────────────────────────────────────────────
+class TuiRegisterRequest(BaseModel):
+    pid: int
+
+@app.post('/tui/register')
+async def tui_register(req: TuiRegisterRequest):
+    global _tui_pid, _tui_create_time
+    _tui_pid = req.pid
+    try:
+        _tui_create_time = psutil.Process(req.pid).create_time()
+    except Exception:
+        _tui_create_time = None
+    return {'status': 'success'}
+
 @app.get('/health')
 async def health():
     if getattr(engine, '_reg_chrome_proc', None) is not None and engine._reg_chrome_proc.poll() is not None:
@@ -89,6 +162,7 @@ async def health():
         'service_pid': os.getpid(),
         'headless': getattr(engine, 'headless', False),
         'active_profile': getattr(engine, 'active_profile', None),
+        'tui_attached': _tui_alive(),
     }
 
 @app.get('/browser/status')
@@ -110,13 +184,17 @@ async def get_browser_tabs():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/start')
+@_locked
 async def start_engine(req: StartRequest):
     if engine.is_running:
         return {'status': 'already_running'}
     try:
         headless = req.headless if req.headless is not None else True
-        cfg = config_utils.load_config()
-        profile_name = req.profile_name or cfg.get('active_profile')
+        profile_name = req.profile_name
+        if not profile_name and req.active_user:
+            profile_name = engine._find_profile_for_username(req.active_user)
+        if req.active_service:
+            engine._active_service = req.active_service
         await engine.start(headless=headless, profile_name=profile_name)
         return {'status': 'success', 'message': f'Engine started (headless={headless})'}
     except Exception as e:
@@ -124,6 +202,7 @@ async def start_engine(req: StartRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/stop')
+@_locked
 async def stop_engine():
     try:
         await engine.stop()
@@ -136,6 +215,7 @@ class RegistrationRequest(BaseModel):
     profile_name: Optional[str] = None  # None = auto-pick next slot (Create), set = use existing (Rebuild)
 
 @app.post('/engine/start_registration')
+@_locked
 async def start_registration(req: RegistrationRequest = RegistrationRequest()):
     """Start a separate headed browser directly on browser_user_data/ for manual account
     registration or re-login. No sandbox — data written directly to the Profile directory.
@@ -150,6 +230,7 @@ async def start_registration(req: RegistrationRequest = RegistrationRequest()):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/stop_registration')
+@_locked
 async def stop_registration():
     """Close the registration browser."""
     try:
@@ -172,6 +253,7 @@ async def get_logs(lines: int = Query(200)):
 
 # ── Account / Profile ──────────────────────────────────────────────────────────
 @app.post('/engine/switch_account')
+@_locked
 async def switch_account(req: SwitchAccountRequest):
     try:
         await engine.switch_account(req.username)
@@ -181,6 +263,7 @@ async def switch_account(req: SwitchAccountRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/re_login')
+@_locked
 async def re_login():
     """Stop and restart with the same profile to force re-login."""
     try:
@@ -224,6 +307,7 @@ async def update_config(updates: dict = Body(...)):
 
 # ── Browser Atomic Operations ──────────────────────────────────────────────────
 @app.post('/browser/navigate')
+@_locked
 async def navigate(req: NavigateRequest):
     try:
         await engine.navigate(req.url)
@@ -232,6 +316,7 @@ async def navigate(req: NavigateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/capture_dom')
+@_locked
 async def capture_dom():
     try:
         return {'dom': await engine.capture_dom()}
@@ -239,6 +324,7 @@ async def capture_dom():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/eval')
+@_locked
 async def eval_js(script: str = Body(..., embed=True)):
     try:
         result = await engine._page.evaluate(script)
@@ -247,6 +333,7 @@ async def eval_js(script: str = Body(..., embed=True)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/browser/account')
+@_locked
 async def get_account():
     try:
         return await engine.get_account_info()
@@ -254,6 +341,7 @@ async def get_account():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/switch_service')
+@_locked
 async def switch_service(req: SwitchServiceRequest):
     try:
         await engine.switch_service(req.service)
@@ -262,6 +350,7 @@ async def switch_service(req: SwitchServiceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/discover')
+@_locked
 async def discover(service: Optional[str] = Query(None)):
     try:
         await _route_service(service)
@@ -271,6 +360,7 @@ async def discover(service: Optional[str] = Query(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/apply_settings')
+@_locked
 async def apply_settings(req: ApplySettingsRequest):
     try:
         await _route_service(req.service)
@@ -283,6 +373,7 @@ async def apply_settings(req: ApplySettingsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/prompt')
+@_locked
 async def set_prompt(req: PromptRequest):
     try:
         await engine.send_prompt(req.text)
@@ -291,6 +382,7 @@ async def set_prompt(req: PromptRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/file/add')
+@_locked
 async def add_file(req: FileRequest):
     try:
         await engine.attach_file(req.path)
@@ -299,6 +391,7 @@ async def add_file(req: FileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/file/remove')
+@_locked
 async def remove_file(req: FileRequest):
     try:
         await engine.remove_file(req.path)
@@ -307,6 +400,7 @@ async def remove_file(req: FileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/browser/current_attachments')
+@_locked
 async def current_attachments():
     try:
         return {'attachments': await engine.get_current_attachments()}
@@ -314,6 +408,7 @@ async def current_attachments():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/clear_attachments')
+@_locked
 async def clear_attachments():
     try:
         await engine.clear_attachments() if hasattr(engine, 'clear_attachments') else None
@@ -322,6 +417,7 @@ async def clear_attachments():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/submit')
+@_locked
 async def submit():
     try:
         await engine.submit()
@@ -330,6 +426,7 @@ async def submit():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/wait_response')
+@_locked
 async def wait_response(req: WaitResponseRequest):
     try:
         result = await engine.wait_for_response(timeout=req.timeout)
@@ -338,6 +435,7 @@ async def wait_response(req: WaitResponseRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/browser/last_response')
+@_locked
 async def last_response():
     try:
         return await engine.get_last_response()
@@ -345,6 +443,7 @@ async def last_response():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/stop')
+@_locked
 async def stop_response():
     try:
         await engine.stop_response()
@@ -353,6 +452,7 @@ async def stop_response():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/redo')
+@_locked
 async def redo_response():
     try:
         await engine.redo_response()
@@ -361,6 +461,7 @@ async def redo_response():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/new_chat')
+@_locked
 async def new_chat(service: Optional[str] = Query(None)):
     try:
         await _route_service(service)
@@ -370,6 +471,7 @@ async def new_chat(service: Optional[str] = Query(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/download')
+@_locked
 async def download_images(req: DownloadRequest):
     try:
         await _route_service(req.service)
@@ -380,6 +482,7 @@ async def download_images(req: DownloadRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/browser/delete_history')
+@_locked
 async def delete_history(req: DeleteHistoryRequest):
     try:
         await engine.delete_history(req.range_name)
@@ -388,6 +491,7 @@ async def delete_history(req: DeleteHistoryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/browser/screenshot')
+@_locked
 async def browser_screenshot(path: str = Query('screenshot.png')):
     try:
         await engine._page.screenshot(path=path)
@@ -396,6 +500,7 @@ async def browser_screenshot(path: str = Query('screenshot.png')):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/browser/click')
+@_locked
 async def browser_click(x: int = Query(...), y: int = Query(...)):
     try:
         await engine._page.mouse.click(x, y)
@@ -405,6 +510,6 @@ async def browser_click(x: int = Query(...), y: int = Query(...)):
 
 # ── Entry Point ────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
-    cfg = config_utils.load_config()
+    cfg = config_utils.load_engine_config()
     port = int(cfg.get('port', 18900))
     uvicorn.run(app, host='127.0.0.1', port=port)
