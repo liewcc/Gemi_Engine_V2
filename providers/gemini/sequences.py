@@ -792,6 +792,26 @@ class GeminiSequences(ProviderAdapter):
 
         logger.debug("Attempting to trigger New Chat via UI...")
 
+        # Wait for the SPA shell to actually finish bootstrapping before we touch
+        # the DOM. On a cold engine start /engine/start returns at domcontentloaded,
+        # long before Gemini's Angular app renders the sidebar; running the click
+        # evaluate against that half-loaded page throws "execution context was
+        # destroyed" (surfaces as HTTP 500) or leaves discover_capabilities hanging.
+        # Best-effort, bounded: if it times out we fall through to the existing
+        # NOT_FOUND -> navigate-to-/app fallback below.
+        try:
+            await self._e._page.wait_for_selector(
+                '[data-test-id="new-chat-button"], '
+                "a[aria-label='New chat'], "
+                "div[aria-label='Enter a prompt for Gemini'], "
+                "div[aria-label='Enter a prompt here'], "
+                "div.ql-editor[contenteditable='true']",
+                state="visible",
+                timeout=20000,
+            )
+        except Exception:
+            logger.debug("new_chat: SPA shell not ready within 20s — proceeding, fallback will handle it.")
+
         # Try finding the element using a robust set of selectors (handling wrapper tag changes)
         result = await self._e._page.evaluate('''() => {
             const btn = document.querySelector('[data-test-id="new-chat-button"]') ||
