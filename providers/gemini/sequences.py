@@ -1428,11 +1428,13 @@ class GeminiSequences(ProviderAdapter):
             return {"status": "error", "message": "No response found to download from."}
 
         valid_imgs = []
+        valid_img_srcs = []   # parallel to valid_imgs: normalized src for re-location in the loop
         for retry in range(20):  # 20 * 0.5s = 10s max
             imgs = await last_response.query_selector_all('single-image img, img.generated-image, .generated-image img, .image-container img, img[alt*="generated" i], img[src^="blob:"]')
             if not imgs:
                 imgs = await last_response.query_selector_all('img')
             valid_imgs = []
+            valid_img_srcs = []
             seen_positions = []
             seen_srcs = set()
             for img in imgs:
@@ -1484,6 +1486,7 @@ class GeminiSequences(ProviderAdapter):
 
                     if not is_dup:
                         valid_imgs.append(img)
+                        valid_img_srcs.append(norm_src)
                         seen_positions.append((img_info.get("x", 0), img_info.get("y", 0), cx, cy))
                         if norm_src and not norm_src.startswith("data:"):
                             seen_srcs.add(norm_src)
@@ -1576,7 +1579,22 @@ class GeminiSequences(ProviderAdapter):
                             imgs = await last_response.query_selector_all('single-image img, img.generated-image, .generated-image img, .image-container img, img[alt*="generated" i], img[src^="blob:"]')
                             if not imgs:
                                 imgs = await last_response.query_selector_all('img')
-                            if idx < len(imgs):
+                            # Re-locate the exact deduped image by matching its normalized src, NOT by raw
+                            # list index. The raw `imgs` list still contains duplicate <img> elements that
+                            # were filtered out during collection; indexing into it by position can grab a
+                            # duplicate (downloading the same picture twice while skipping another).
+                            target_src = valid_img_srcs[idx] if idx < len(valid_img_srcs) else None
+                            if target_src and not target_src.startswith("data:"):
+                                for cand in imgs:
+                                    cand_src = await cand.get_attribute('src')
+                                    cand_src = cand_src.strip() if cand_src else ""
+                                    if "googleusercontent.com" in cand_src and "=" in cand_src:
+                                        cand_src = cand_src.split("=")[0]
+                                    if cand_src == target_src:
+                                        img = cand
+                                        break
+                            if img is None and idx < len(imgs):
+                                # Fallback: src changed/unavailable — fall back to positional index.
                                 img = imgs[idx]
                     except Exception as re_locate_err:
                         logger.debug(f"DL-DIAG: Error re-locating image at index {idx}: {re_locate_err}")
@@ -1821,10 +1839,10 @@ class GeminiSequences(ProviderAdapter):
                         with Image.open(io.BytesIO(raw)) as pil_img:
                             save_with_metadata(pil_img, pil_img, save_path, extra_meta=extra_meta)
 
-                        # Size validation: file must be >= 1MB, else the dialog hi-res img wasn't ready.
+                        # Size validation: file must be >= 1.5MB, else the dialog hi-res img wasn't ready.
                         file_sz = os.path.getsize(save_path)
-                        if file_sz < 1024 * 1024:
-                            logger.debug(f"DL-DIAG: Canvas result still too small ({file_sz/1024:.1f}KB < 1MB). Low-res placeholder captured. Discarding.")
+                        if file_sz < 1536 * 1024:
+                            logger.debug(f"DL-DIAG: Canvas result still too small ({file_sz/1024:.1f}KB < 1.5MB). Low-res placeholder captured. Discarding.")
                             try:
                                 os.remove(save_path)
                             except Exception as rm_err:
@@ -1864,32 +1882,42 @@ class GeminiSequences(ProviderAdapter):
                 # ── Button-based download path using Playwright expect_download ──────────────
                 try:
                     logger.debug("DL-DIAG: Triggering download and waiting for Playwright download event...")
-                    async with self._e._page.expect_download(timeout=90000) as download_info:
-                        btn_clicked = await self._e._page.evaluate('''() => {
-                            const dialog = document.querySelector('mat-dialog-container');
-                            const overlay = document.querySelector('.cdk-overlay-container .cdk-overlay-pane');
-                            const scope = dialog || overlay || document;
+                    # A JS btn.click() inside evaluate() carries no user activation, so Chromium
+                    # can silently block the programmatic download and the event never fires.
+                    # Use a real Playwright click (trusted input via CDP) instead.
+                    async with self._e._page.expect_download(timeout=120000) as download_info:
+                        try:
+                            await self._e._page.locator(
+                                'mat-dialog-container button[aria-label="Download full-sized image"], '
+                                '.cdk-overlay-container .cdk-overlay-pane button[aria-label="Download full-sized image"]'
+                            ).first.click(timeout=5000)
+                        except Exception as primary_click_err:
+                            logger.debug(f"DL-DIAG: Primary download-button click failed ({primary_click_err}), resolving via handle...")
+                            btn_handle = await self._e._page.evaluate_handle('''() => {
+                                const dialog = document.querySelector('mat-dialog-container');
+                                const overlay = document.querySelector('.cdk-overlay-container .cdk-overlay-pane');
+                                const scope = dialog || overlay || document;
 
-                            // Most specific: aria-label="Download full-sized image"
-                            let btn = scope.querySelector('button[aria-label="Download full-sized image"]');
-                            if (!btn) {
-                                // Fallback: closest button to a download mat-icon
-                                const icon = scope.querySelector(
-                                    'mat-icon[data-mat-icon-name="download"], mat-icon[fonticon="download"]');
-                                if (icon) btn = icon.closest('button') || icon;
-                            }
-                            if (!btn) {
-                                btn = Array.from(scope.querySelectorAll('button'))
-                                    .find(x => (x.ariaLabel || '').toLowerCase().includes('download') ||
-                                               x.innerText.toLowerCase().includes('download'));
-                            }
-                            if (btn) { btn.click(); return true; }
-                            return false;
-                        }''')
-
-                        if not btn_clicked:
-                            logger.debug("DL-DIAG: click_result=not_found")
-                            raise Exception("Download button vanished between detection and click")
+                                // Most specific: aria-label="Download full-sized image"
+                                let btn = scope.querySelector('button[aria-label="Download full-sized image"]');
+                                if (!btn) {
+                                    // Fallback: closest button to a download mat-icon
+                                    const icon = scope.querySelector(
+                                        'mat-icon[data-mat-icon-name="download"], mat-icon[fonticon="download"]');
+                                    if (icon) btn = icon.closest('button') || icon;
+                                }
+                                if (!btn) {
+                                    btn = Array.from(scope.querySelectorAll('button'))
+                                        .find(x => (x.ariaLabel || '').toLowerCase().includes('download') ||
+                                                   x.innerText.toLowerCase().includes('download'));
+                                }
+                                return btn || null;
+                            }''')
+                            btn_el = btn_handle.as_element()
+                            if btn_el is None:
+                                logger.debug("DL-DIAG: click_result=not_found")
+                                raise Exception("Download button vanished between detection and click")
+                            await btn_el.click()
 
                     download = await download_info.value
 
@@ -1915,10 +1943,10 @@ class GeminiSequences(ProviderAdapter):
                     logger.debug(f"DL-DIAG: Native download failed: {dl_err}")
                     raise dl_err
 
-                # Size validation: saved file must be >= 1MB
+                # Size validation: saved file must be >= 1.5MB
                 file_sz = os.path.getsize(save_path)
-                if file_sz < 1024 * 1024:
-                    logger.debug(f"DL-DIAG: Downloaded file too small ({file_sz/1024:.1f}KB < 1MB). Discarding.")
+                if file_sz < 1536 * 1024:
+                    logger.debug(f"DL-DIAG: Downloaded file too small ({file_sz/1024:.1f}KB < 1.5MB). Discarding.")
                     try:
                         os.remove(save_path)
                     except Exception:
@@ -2017,6 +2045,10 @@ class GeminiSequences(ProviderAdapter):
                         if fetch_err:
                             logger.debug(f"DL-DIAG: Blob fetch failed with error: {fetch_err}")
                         logger.debug(f"DL-DIAG: Rescued {len(raw)} bytes ({len(raw)/1024:.0f}KB) via {method}, naturalWidth={nw}")
+                        if len(raw) < 1536 * 1024:
+                            # Blob rescue is intentionally ungated (better a low-res image than none),
+                            # but degraded saves must be visible in the log.
+                            logger.debug(f"DL-DIAG: WARNING blob rescue below 1.5MB standard ({len(raw)/1024:.0f}KB) — likely on-screen preview, not full-res.")
 
                         # Reject if the image dimensions are too small (indicates a thumbnail)
                         if nw < 512:
