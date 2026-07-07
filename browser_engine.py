@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 import shutil
@@ -12,6 +13,63 @@ from providers.copilot.sequences import CopilotSequences
 from providers.zai.sequences import ZaiSequences
 
 logger = logging.getLogger(__name__)
+
+# Elements that only appear in specific UI states (generating, file attached, etc.)
+# and are legitimately absent on an idle page. Shared across all four providers.
+STATE_DEPENDENT = frozenset({
+    # stop / cancel generation
+    'stop_button', 'find_stop_button',
+    # processing / generating indicators
+    'processing_state_container', 'find_spinner',
+    # redo / try-again (only after a response)
+    'redo_button', 'try_again_button', 'find_redo_button',
+    # submit buttons — input-state-dependent (hidden/disabled when input is empty)
+    'submit_button', 'find_submit_button',
+    # attachment chips / list (only when files are attached)
+    'cancel_upload_buttons', 'find_attachment_list', 'find_attachment_chips',
+    # image results (only after image generation)
+    'image_results', 'find_image_results',
+    # download button (only on image results)
+    'download_full_size_button',
+    # agreement / popup dismiss buttons (transient overlays)
+    'agreement_popup_buttons',
+    # activity / history deletion dialogs (different page)
+    'delete_activity_button', 'modal_delete_button', 'modal_confirm_button',
+    # zai thinking chain (only after a thinking response)
+    'find_thinking_chain',
+    # zai artifact panel / iframe (only when artifact panel is open)
+    'find_artifact_panel', 'find_artifact_iframe',
+    # gemini toolbox drawer items (only while drawer is open)
+    'more_upload_button', 'more_tools_button', 'tool_drawer_item',
+    # response containers / text (only exist after a model reply)
+    'response_container', 'find_response_container', 'find_response_text',
+})
+
+
+def _enumerate_locators(dom) -> list[tuple[str, list[str]]]:
+    """Enumerate public zero-argument DOM methods and their selector chains.
+
+    Pure function — no Playwright needed, testable offline.
+    """
+    results = []
+    for name, method in inspect.getmembers(dom, predicate=inspect.ismethod):
+        if name.startswith('_'):
+            continue
+        sig = inspect.signature(method)
+        # Skip methods that require parameters (beyond self, already bound)
+        required = [p for p in sig.parameters.values()
+                    if p.default is inspect.Parameter.empty]
+        if required:
+            continue
+        value = method()
+        if isinstance(value, str):
+            chain = [value]
+        elif isinstance(value, list):
+            chain = value
+        else:
+            chain = []
+        results.append((name, chain))
+    return results
 
 
 class BrowserEngine:
@@ -994,4 +1052,64 @@ class BrowserEngine:
         return {
             "tabs": tabs_info,
             "active_service": self._active_service
+        }
+
+    async def selector_audit(self) -> dict:
+        """Audit every selector from the active provider's DOM against the live page."""
+        provider = self._get_provider()
+        dom = provider._dom
+        entries = _enumerate_locators(dom)
+
+        healthy = 0
+        not_applicable = 0
+        state_dependent_names = []
+        degraded = []
+        broken = []
+        errors = []
+
+        for name, chain in entries:
+            if not chain:
+                not_applicable += 1
+                continue
+
+            hit_index = None
+            matches = 0
+            error_msg = None
+
+            for i, sel in enumerate(chain):
+                try:
+                    count = await self._page.locator(sel).count()
+                except Exception as exc:
+                    error_msg = str(exc)
+                    break
+                if count > 0:
+                    hit_index = i
+                    matches = count
+                    break
+
+            if error_msg is not None:
+                errors.append({"locator": name, "chain": chain,
+                               "hit_index": None, "matches": 0,
+                               "error": error_msg})
+            elif hit_index is not None:
+                if hit_index == 0:
+                    healthy += 1
+                else:
+                    degraded.append({"locator": name, "chain": chain,
+                                     "hit_index": hit_index, "matches": matches})
+            else:
+                if name in STATE_DEPENDENT:
+                    state_dependent_names.append(name)
+                else:
+                    broken.append({"locator": name, "chain": chain,
+                                   "hit_index": None, "matches": 0})
+
+        return {
+            "provider": self._active_service,
+            "healthy": healthy,
+            "not_applicable": not_applicable,
+            "state_dependent": state_dependent_names,
+            "degraded": degraded,
+            "broken": broken,
+            "errors": errors,
         }

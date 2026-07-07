@@ -128,4 +128,4 @@ class GeminiDOM:
     # ── Conversations List ─────────────────────────────────────────────────────
 
     def conversations_list(self) -> str:
-        return 'div[data-test-id="conversations-list"]'
+        return '[data-test-id="chat-history-container"], div[data-test-id="conversations-list"]'

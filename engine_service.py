@@ -367,6 +367,16 @@ async def discover(service: Optional[str] = Query(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post('/browser/selector_audit')
+@_locked
+async def selector_audit(service: Optional[str] = Query(None)):
+    try:
+        await _route_service(service)
+        data = await engine.selector_audit()
+        return {'status': 'success', 'data': data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post('/browser/apply_settings')
 @_locked
 async def apply_settings(req: ApplySettingsRequest):
