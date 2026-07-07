@@ -2338,22 +2338,18 @@ class GeminiSequences(ProviderAdapter):
             except Exception:
                 pass
 
-            self._e.automation_status["current_account_id"] = account_id
             return {"logged_in": True, "account_id": account_id, "status": "logged_in"}
 
         elif is_not_logged_in:
-            self._e.automation_status["current_account_id"] = None
             return {"logged_in": False, "account_id": None, "status": "not_logged_in"}
 
         else:
             # Fallback: check Gemini sidebar conversations list
-            chat_list = self._e._page.locator('div[data-test-id="conversations-list"]').first
+            chat_list = self._e._page.locator(self._dom.conversations_list()).first
             if await chat_list.is_visible():
                 account_id = "Unknown (sidebar detected)"
-                self._e.automation_status["current_account_id"] = account_id
                 return {"logged_in": True, "account_id": account_id, "status": "logged_in"}
 
-            self._e.automation_status["current_account_id"] = None
             return {"logged_in": False, "account_id": None, "status": "unknown"}
 
     async def get_gem_title(self) -> dict:
