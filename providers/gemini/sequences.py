@@ -4,6 +4,7 @@ import os
 import re
 import time
 from datetime import datetime
+from config_utils import load_config
 
 from providers.base import ProviderAdapter
 from providers.gemini.dom import GeminiDOM
