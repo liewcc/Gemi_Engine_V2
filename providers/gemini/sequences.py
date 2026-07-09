@@ -41,6 +41,34 @@ class GeminiSequences(ProviderAdapter):
         self._dom = GeminiDOM()
         self._caps = {}
 
+    async def _dismiss_overlays(self, max_attempts=5):
+        """Close lingering image dialog / editing overlay so later clicks aren't intercepted."""
+        for _ in range(max_attempts):
+            try:
+                state = await self._e._page.evaluate(
+                    '() => ({dialog: !!document.querySelector("mat-dialog-container"),'
+                    ' editor: !!document.querySelector("edit-toolbar-v2, .doodle-editing-column")})')
+            except Exception:
+                return False
+            if not (state.get("dialog") or state.get("editor")):
+                return True
+            try:
+                clicked = await self._e._page.evaluate(
+                    '''() => {
+                        const btn = document.querySelector('.cdk-overlay-container button[aria-label="Close"]');
+                        if (btn) { btn.click(); return true; }
+                        return false;
+                    }''')
+                if not clicked:
+                    await self._e._page.keyboard.press("Escape")
+            except Exception:
+                try:
+                    await self._e._page.keyboard.press("Escape")
+                except Exception:
+                    pass
+            await asyncio.sleep(0.7)
+        return False
+
     async def send_prompt(self, text):
         """Types text into Gemini's prompt area and sends it."""
         if not self._e.is_running:
@@ -252,6 +280,7 @@ class GeminiSequences(ProviderAdapter):
         """
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
+        await self._dismiss_overlays()
 
         # Get the src of the last image on the page before we submit or monitor
         self._e._last_seen_src = await self._e._page.evaluate('''() => {
@@ -668,6 +697,8 @@ class GeminiSequences(ProviderAdapter):
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
 
+        await self._dismiss_overlays()
+
         # 1. Scroll to reveal Redo if hidden
         await self._e._page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
         await asyncio.sleep(0.5)
@@ -700,14 +731,15 @@ class GeminiSequences(ProviderAdapter):
             logger.debug("Redo button not found.")
             return {"status": "error", "message": "Redo button not found on page."}
 
-        # Click the redo button natively using Playwright
-        redo_loc = self._e._page.locator('[data-automation-temp-redo="true"]')
-        await redo_loc.click()
-        # Clean up attribute
-        try:
-            await redo_loc.evaluate("el => el.removeAttribute('data-automation-temp-redo')")
-        except:
-            pass
+        # Dismiss any image dialog Gemini auto-reopened, then JS-click (bypasses pointer interception)
+        await self._dismiss_overlays()
+        clicked = await self._e._page.evaluate('''() => {
+            const btn = document.querySelector('[data-automation-temp-redo="true"]');
+            if (btn) { btn.click(); btn.removeAttribute('data-automation-temp-redo'); return true; }
+            return false;
+        }''')
+        if not clicked:
+            return {"status": "error", "message": "Redo button vanished before click."}
 
         # Wait briefly for sub-menu if it exists
         await asyncio.sleep(1.0)
@@ -726,14 +758,10 @@ class GeminiSequences(ProviderAdapter):
         }''')
 
         if try_again_info == "found":
-            try_again_loc = self._e._page.locator('[data-automation-temp-tryagain="true"]')
-            # Click Try again natively
-            await try_again_loc.click()
-            # Clean up attribute
-            try:
-                await try_again_loc.evaluate("el => el.removeAttribute('data-automation-temp-tryagain')")
-            except:
-                pass
+            await self._e._page.evaluate('''() => {
+                const el = document.querySelector('[data-automation-temp-tryagain="true"]');
+                if (el) { el.click(); el.removeAttribute('data-automation-temp-tryagain'); }
+            }''')
             result = "REDO_WITH_TRY_AGAIN"
         else:
             result = "REDO_CLICKED"
@@ -787,6 +815,7 @@ class GeminiSequences(ProviderAdapter):
         """
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
+        await self._dismiss_overlays()
 
 
 
@@ -2105,6 +2134,8 @@ class GeminiSequences(ProviderAdapter):
                         await self._e._page.keyboard.press("Escape")
                     except:
                         pass
+
+        await self._dismiss_overlays()
 
         if dl_count == 0:
             return {"status": "ignored", "message": "Images detected but all downloads failed.", "saved_paths": []}
