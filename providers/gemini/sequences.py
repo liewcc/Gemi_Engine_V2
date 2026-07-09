@@ -12,6 +12,21 @@ from providers.gemini.dom import GeminiDOM
 logger = logging.getLogger(__name__)
 
 
+def save_with_metadata(p_img, original_img, output_path, extra_meta=None):
+    """Save PNG preserving whitelisted GemiPersona metadata fields."""
+    from PIL import PngImagePlugin
+    meta = PngImagePlugin.PngInfo()
+    whitelist = ["aspect_ratio", "prompt", "url", "upload_path"]
+    for k, v in original_img.info.items():
+        if k in whitelist:
+            meta.add_text(k, str(v))
+    if extra_meta:
+        for k, v in extra_meta.items():
+            if k in whitelist:
+                meta.add_text(k, str(v))
+    p_img.save(output_path, "PNG", pnginfo=meta)
+
+
 class GeminiSequences(ProviderAdapter):
     """Operation sequences for the Gemini web UI.
 
@@ -1532,15 +1547,6 @@ class GeminiSequences(ProviderAdapter):
         from PIL import Image
         import io
         import hashlib
-        try:
-            from processing_utils import save_with_metadata
-        except ModuleNotFoundError:
-            import sys
-            from config_utils import get_root
-            project_core = os.path.join(get_root(), os.getenv("BROWSER_ENGINE_DATA_SUBDIR", "core"))
-            if project_core not in sys.path:
-                sys.path.insert(0, project_core)
-            from processing_utils import save_with_metadata
         seen_hashes = set()
 
         def get_image_ahash(path):
