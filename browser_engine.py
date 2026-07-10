@@ -185,6 +185,12 @@ class BrowserEngine:
         self._browser = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=self._sandbox_dir,
             headless=headless,
+            # Force the full chromium binary in new-headless mode; the default
+            # chromium_headless_shell restores Google sessions as signed-out.
+            channel='chromium',
+            # Playwright's default --use-mock-keychain breaks os_crypt cookie
+            # decryption for real Chrome profiles (proven V1 recipe).
+            ignore_default_args=['--enable-automation', '--use-mock-keychain'],
             args=[
                 '--no-first-run',
                 '--no-default-browser-check',
@@ -213,6 +219,17 @@ class BrowserEngine:
                 page = await self._browser.new_page()
             await page.add_init_script(_stealth_script)
             self._pages[name] = page
+
+        # Headless Chromium reports "HeadlessChrome" in the UA, which makes Google
+        # serve a signed-out session even when the profile has valid cookies.
+        # Override with the equivalent headed UA (version tracks the real browser).
+        if headless:
+            ua = await next(iter(self._pages.values())).evaluate('navigator.userAgent')
+            if 'HeadlessChrome' in ua:
+                clean_ua = ua.replace('HeadlessChrome', 'Chrome')
+                for page in self._pages.values():
+                    cdp = await self._browser.new_cdp_session(page)
+                    await cdp.send('Network.setUserAgentOverride', {'userAgent': clean_ua})
 
         # Determine which tab to eagerly navigate
         active = self._active_service if self._active_service in self.BASE_URLS else 'gemini'
