@@ -201,8 +201,8 @@ class BrowserEngine:
             name: cls(self) for name, cls in self._PROVIDER_REGISTRY.items()
         }
 
-        # Open one tab per provider and navigate in parallel
-        import asyncio
+        # Open one tab per provider; only navigate the active service tab now.
+        # All other tabs stay on about:blank and are navigated lazily on first switch.
         _stealth_script = "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         provider_names = list(self._PROVIDER_REGISTRY.keys())
         existing_pages = self._browser.pages
@@ -213,15 +213,10 @@ class BrowserEngine:
                 page = await self._browser.new_page()
             await page.add_init_script(_stealth_script)
             self._pages[name] = page
-        async def _navigate(name):
-            page = self._pages[name]
-            url = self.BASE_URLS[name]
-            # Use JS navigation to avoid CDP-level automation signals that trigger Cloudflare
-            await page.goto('about:blank', wait_until='commit')
-            await page.evaluate(f"window.location.href = '{url}'")
-            await page.wait_for_load_state('domcontentloaded')
 
-        await asyncio.gather(*[_navigate(name) for name in provider_names])
+        # Determine which tab to eagerly navigate
+        active = self._active_service if self._active_service in self.BASE_URLS else 'gemini'
+        await self._navigate_provider_tab(active)
 
         self.is_running = True
         logger.info("engine started headless=%s profile=%s", headless, profile_name)
@@ -255,6 +250,19 @@ class BrowserEngine:
             except Exception as e:
                 logger.warning("sandbox cleanup failed: %s", e)
         self._sandbox_dir = None
+
+    async def _navigate_provider_tab(self, name: str):
+        """Navigate the tab for *name* to its BASE_URL using JS navigation.
+
+        JS-based navigation avoids CDP-level automation signals that would
+        otherwise trigger Cloudflare bot-detection on some providers.
+        """
+        page = self._pages[name]
+        url = self.BASE_URLS[name]
+        await page.goto('about:blank', wait_until='commit')
+        await page.evaluate(f"window.location.href = '{url}'")
+        await page.wait_for_load_state('domcontentloaded')
+        logger.debug("navigated provider tab: %s -> %s", name, url)
 
     async def start_registration(self, profile_name: str = None):
         """
@@ -577,12 +585,22 @@ class BrowserEngine:
         return self._providers[self._active_service]
 
     async def switch_service(self, service: str):
-        """Switch the active provider tab (no navigation — tabs are pre-loaded at start)."""
+        """Switch the active provider tab.
+
+        Tabs for non-active providers are kept on about:blank at start (lazy
+        strategy). The first time a tab is brought to front its URL is still
+        about:blank, so we navigate it to the provider URL before revealing it.
+        Subsequent switches are instant because the tab is already loaded.
+        """
         if service not in self._PROVIDER_REGISTRY:
             raise ValueError(f"Unknown service: {service}")
         self._active_service = service
         page = self._pages.get(service)
         if page:
+            # Lazy-navigate if this tab has never been loaded
+            if page.url == 'about:blank' or page.url.startswith('about:'):
+                logger.info("lazy-navigating provider tab: %s", service)
+                await self._navigate_provider_tab(service)
             await page.bring_to_front()
         logger.info("switched service to %s", service)
 
