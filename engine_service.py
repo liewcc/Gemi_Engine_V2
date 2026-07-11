@@ -306,11 +306,11 @@ async def switch_account(req: SwitchAccountRequest):
 async def re_login():
     """Stop and restart with the same profile to force re-login."""
     try:
-        profile = engine._find_profile_for_username(
-            config_utils.load_config().get('active_user', '')
-        )
+        cfg = config_utils.load_config()
+        profile = engine._find_profile_for_username(cfg.get('active_user', ''))
+        headless = bool(cfg.get('headless', False))
         await engine.stop()
-        await engine.start(profile_name=profile)
+        await engine.start(headless=headless, profile_name=profile)
         return {'status': 'success'}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
