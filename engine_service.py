@@ -21,7 +21,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('engine')
 
 # ── Windows asyncio policy ─────────────────────────────────────────────────────
 if os.name == 'nt':
@@ -76,6 +76,7 @@ async def _idle_watcher():
             await engine.stop()
         except Exception as e:
             logger.error("idle shutdown: engine.stop failed: %s", e)
+        logger.info("service stopped")
         os._exit(0)
 
 @app.on_event("startup")
@@ -85,6 +86,12 @@ async def _on_startup():
     _idle_timeout_enabled = bool(cfg.get("idle_timeout_enabled", True))
     _idle_timeout_seconds = int(cfg.get("idle_timeout_minutes", 15)) * 60
     asyncio.create_task(_idle_watcher())
+    logger.info("service started")
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logger.info("service stopped")
 
 
 async def _route_service(service: Optional[str]):

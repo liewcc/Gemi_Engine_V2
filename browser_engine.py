@@ -236,7 +236,7 @@ class BrowserEngine:
         await self._navigate_provider_tab(active)
 
         self.is_running = True
-        logger.info("engine started headless=%s profile=%s", headless, profile_name)
+        logger.info("browser started headless=%s profile=%s", headless, profile_name)
 
     async def stop(self):
         """Close browser and clean up sandbox."""
@@ -258,7 +258,7 @@ class BrowserEngine:
             self.browser_pids = []
             self.headless = False
             self.active_profile = None
-            logger.info("engine stopped")
+            logger.info("browser stopped")
 
     async def _cleanup_sandbox(self):
         if self._sandbox_dir and os.path.exists(self._sandbox_dir):
