@@ -15,8 +15,10 @@ from browser_engine import BrowserEngine
 import config_utils
 
 # ── Logging (set up once, all modules inherit) ─────────────────────────────────
+LOG_FILE = 'engine.log'
+_log_handler = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=3)
 logging.basicConfig(
-    handlers=[RotatingFileHandler('engine.log', maxBytes=5_000_000, backupCount=3)],
+    handlers=[_log_handler],
     format='%(asctime)s %(levelname)-8s %(name)-20s %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     level=logging.INFO,
@@ -258,11 +260,33 @@ async def stop_registration():
 @app.get('/engine/logs')
 async def get_logs(lines: int = Query(200)):
     try:
-        if not os.path.exists('engine.log'):
-            return {'logs': []}
-        with open('engine.log', encoding='utf-8', errors='replace') as f:
-            all_lines = f.readlines()
-        return {'logs': all_lines[-lines:]}
+        # Read the current log, then backfill from rotated backups (.1/.2/.3, newest
+        # first) until we have `lines` lines. Without this the viewer's tail collapses
+        # to near-empty the instant a rotation happens, since it only saw engine.log.
+        collected = []
+        for path in [LOG_FILE, LOG_FILE + '.1', LOG_FILE + '.2', LOG_FILE + '.3']:
+            if len(collected) >= lines or not os.path.exists(path):
+                if len(collected) >= lines:
+                    break
+                continue
+            with open(path, encoding='utf-8', errors='replace') as f:
+                collected = f.readlines() + collected
+        return {'logs': collected[-lines:]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/engine/clear_logs')
+async def clear_logs():
+    """Truncate the live engine.log so the UI's Clear Engine Log button really
+    empties it. The RotatingFileHandler holds this file open, so we must truncate
+    through its own stream rather than reopening from another process (Windows)."""
+    try:
+        stream = _log_handler.stream
+        if stream is not None:
+            stream.seek(0)
+            stream.truncate()
+            stream.flush()
+        return {'status': 'success'}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

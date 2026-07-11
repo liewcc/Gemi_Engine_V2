@@ -127,12 +127,8 @@ class GeminiSequences(ProviderAdapter):
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
 
-        LOG_FILE = os.path.join(self._e._data_dir, "engine.log")
-
         def log_debug(msg):
-            timestamp = datetime.now().strftime("[%H:%M:%S]")
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"{timestamp} [SYNC] {msg}\n")
+            logger.info("[SYNC] %s", msg)
 
         # 1. Detection Phase: Get filenames currently in Gemini
         raw_labels = await self._e._page.evaluate('''() => {
