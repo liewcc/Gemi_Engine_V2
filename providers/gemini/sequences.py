@@ -769,7 +769,8 @@ class GeminiSequences(ProviderAdapter):
             is_gen = await self._e._page.evaluate('''() => {
                 return !!document.querySelector('mat-progress-bar') ||
                        !!document.querySelector('mat-icon[data-mat-icon-name="stop"]') ||
-                       !!document.querySelector('section.processing-state_container--processing');
+                       !!document.querySelector('section.processing-state_container--processing') ||
+                       !!document.querySelector('.image-gen-shimmer-placeholder');
             }''')
             if is_gen:
                 break
@@ -2630,6 +2631,7 @@ class GeminiSequences(ProviderAdapter):
         has_started = False
         start_gen_time: float | None = None
         idle_start: float | None = None
+        last_gen_time: float | None = None
         last_logged = ''
 
         iterations = max(1, timeout // 2)
@@ -2658,8 +2660,12 @@ class GeminiSequences(ProviderAdapter):
                     })();
                 const progressBar = document.querySelector("mat-progress-bar");
                 const activeContainer = document.querySelector("section.processing-state_container--processing");
+                const imgShimmer = document.querySelector(".image-gen-shimmer-placeholder");
+                const imgOverlay = document.querySelector("[data-test-id=\\\"image-loading-overlay\\\"]");
+                const procHeader = Array.from(document.querySelectorAll(".response-container-header-processing-state"))
+                    .some(e => isVisible(e) && e.getBoundingClientRect().width > 0);
 
-                if (stopIcon || isVisible(progressBar) || isVisible(activeContainer)) {
+                if (stopIcon || isVisible(progressBar) || isVisible(activeContainer) || imgShimmer || isVisible(imgOverlay) || procHeader) {
                     const refusalKws = args.refused || [];
                     let genText = "";
                     if (activeContainer) {
@@ -2704,7 +2710,7 @@ class GeminiSequences(ProviderAdapter):
                     "mat-icon[fonticon=\\"send_spark\\"]",
                 ];
                 const inSendMode = sendModes.some(s => !!document.querySelector(s));
-                const isGenerating = !!(stopIcon || isVisible(progressBar) || isVisible(activeContainer));
+                const isGenerating = !!(stopIcon || isVisible(progressBar) || isVisible(activeContainer) || imgShimmer || isVisible(imgOverlay) || procHeader);
                 const sendReady = (inSendMode && !!(
                     document.querySelector("[data-test-id=\\"send-button-container\\"].visible") ||
                     document.querySelector("gem-icon-button.send-button[aria-disabled=\\"false\\"]") ||
@@ -2749,6 +2755,7 @@ class GeminiSequences(ProviderAdapter):
 
             if status == 'generating':
                 idle_start = None
+                last_gen_time = now
                 if not has_started:
                     has_started = True
                     start_gen_time = now
@@ -2764,9 +2771,9 @@ class GeminiSequences(ProviderAdapter):
                     return {'status': 'done', 'has_image': False, 'text': text}
                 if not idle_start:
                     idle_start = now
-                if has_started and start_gen_time and (now - start_gen_time > 4.0):
+                if has_started and last_gen_time and (now - last_gen_time > 10.0):
                     return {'status': 'error', 'message': 'Stopped or failed to generate image.'}
-                if (now - idle_start) > 8.0:
+                if not has_started and (now - idle_start) > 20.0:
                     return {'status': 'error', 'message': 'Sustained idle with no image and no text.'}
             elif status == 'reset':
                 if has_started:
