@@ -2311,6 +2311,26 @@ class GeminiSequences(ProviderAdapter):
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
 
+        # 1. Cookie-based check (language-independent, fast, and robust source of truth)
+        try:
+            cookies = await self._e._browser.cookies()
+            has_session = any(c.get('name') in ('__Secure-1PSID', '__Secure-3PSID', 'SID') and '.google.com' in c.get('domain', '') for c in cookies)
+            if has_session:
+                account_id = "Active Account"
+                active_profile = getattr(self._e, 'active_profile', None)
+                if active_profile:
+                    try:
+                        cache = self._e._load_profile_cache()
+                        info = cache.get(active_profile, {})
+                        email = info.get('user_name', '').strip()
+                        if email:
+                            account_id = email
+                    except Exception:
+                        pass
+                return {"logged_in": True, "account_id": account_id, "status": "logged_in"}
+        except Exception as e:
+            logger.warning("get_account_info cookie check failed: %s", e)
+
         # Brief stability wait, then try network idle
         await self._e._page.wait_for_timeout(200)
         try:
