@@ -257,6 +257,21 @@ async def stop_registration():
         logger.error('stop_registration: %s', e)
         raise HTTPException(status_code=500, detail=str(e))
 
+class LogMessageRequest(BaseModel):
+    message: str
+    level: str = 'info'
+
+@app.post('/engine/log')
+async def log_message(req: LogMessageRequest):
+    level = req.level.lower()
+    if level == 'error':
+        logger.error(req.message)
+    elif level == 'warning' or level == 'warn':
+        logger.warning(req.message)
+    else:
+        logger.info(req.message)
+    return {'status': 'success'}
+
 @app.get('/engine/logs')
 async def get_logs(lines: int = Query(200)):
     try:
@@ -328,6 +343,32 @@ async def get_profiles():
 async def get_profiles_status():
     profiles = engine.get_profiles()
     return {'profiles': profiles, 'active': engine._active_service}
+
+@app.post('/engine/profiles/repack')
+@_locked
+async def repack_profiles():
+    try:
+        engine.repack_profile_ids()
+        return {'status': 'success'}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/engine/profiles/delete')
+@_locked
+async def delete_profile(data: dict = Body(...)):
+    profile_name = data.get('profile')
+    if not profile_name:
+        raise HTTPException(status_code=400, detail="Profile name required")
+    try:
+        engine.delete_profile(profile_name)
+        return {'status': 'success'}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 @app.get('/engine/config')

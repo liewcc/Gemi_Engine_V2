@@ -796,7 +796,7 @@ class BrowserEngine:
             with open(local_state_path, 'w', encoding='utf-8') as f:
                 json.dump(local_state, f, separators=(',', ':'))
                 
-        config_path = os.path.join(os.path.dirname(profiles_path), 'data', 'config.json')
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config.json'))
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 try:
@@ -810,6 +810,8 @@ class BrowserEngine:
                         config['active_profile'] = rename_map[active]
                     else:
                         config['active_profile'] = None
+                        if 'active_user' in config:
+                            config['active_user'] = ''
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4)
 
@@ -847,7 +849,7 @@ class BrowserEngine:
             with open(local_state_path, 'w', encoding='utf-8') as f:
                 json.dump(local_state, f, separators=(',', ':'))
                 
-        config_path = os.path.join(os.path.dirname(os.path.abspath(self._data_dir)), 'data', 'config.json')
+        config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config.json'))
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 try:
@@ -856,6 +858,8 @@ class BrowserEngine:
                     config = {}
             if config.get('active_profile') == profile_name:
                 config['active_profile'] = None
+                if 'active_user' in config:
+                    config['active_user'] = ''
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4)
 
