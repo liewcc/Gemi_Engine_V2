@@ -1019,6 +1019,11 @@ class BrowserEngine:
         await self._get_provider().submit()
 
     async def wait_for_response(self, timeout: int = 180) -> dict:
+        # Clear any stale interrupt so a stop from a previous run does not
+        # immediately bail this fresh wait. An interrupt fired DURING this wait
+        # (POST /engine/interrupt) is still honoured — providers check the event
+        # on every poll iteration.
+        self._stop_automation_event.clear()
         return await self._get_provider().wait_for_response(timeout=timeout)
 
     async def get_last_response(self) -> dict:

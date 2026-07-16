@@ -2656,6 +2656,12 @@ class GeminiSequences(ProviderAdapter):
 
         iterations = max(1, timeout // 2)
         for _ in range(iterations):
+            if self._e._stop_automation_event.is_set():
+                try:
+                    await self.stop_response()
+                except Exception:
+                    pass
+                return {'status': 'stopped', 'message': 'Monitoring interrupted by stop signal.'}
             data = await self._e._page.evaluate('''(args) => {
                 const bodyText = document.body.innerText.toLowerCase();
                 for (const kw of args.quota) {

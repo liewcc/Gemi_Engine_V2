@@ -196,32 +196,53 @@ async def get_browser_tabs():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/start')
-@_locked
 async def start_engine(req: StartRequest):
+    # Fast unlocked pre-check: if the browser is already up, answer immediately
+    # instead of queueing behind a long-held browser lock (e.g. an in-flight
+    # wait_response holding the lock for up to its full timeout).
     if engine.is_running:
         return {'status': 'already_running'}
-    try:
-        headless = req.headless if req.headless is not None else True
-        profile_name = req.profile_name
-        if not profile_name and req.active_user:
-            profile_name = engine._find_profile_for_username(req.active_user)
-        if req.active_service:
-            engine._active_service = req.active_service
-        await engine.start(headless=headless, profile_name=profile_name)
-        return {'status': 'success', 'message': f'Engine started (headless={headless})'}
-    except Exception as e:
-        logger.error('start_engine: %s', e)
-        raise HTTPException(status_code=500, detail=str(e))
+    async with _browser_lock:
+        if engine.is_running:
+            return {'status': 'already_running'}
+        try:
+            headless = req.headless if req.headless is not None else True
+            profile_name = req.profile_name
+            if not profile_name and req.active_user:
+                profile_name = engine._find_profile_for_username(req.active_user)
+            if req.active_service:
+                engine._active_service = req.active_service
+            await engine.start(headless=headless, profile_name=profile_name)
+            return {'status': 'success', 'message': f'Engine started (headless={headless})'}
+        except Exception as e:
+            logger.error('start_engine: %s', e)
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/engine/stop')
-@_locked
 async def stop_engine():
-    try:
-        await engine.stop()
+    # Fast unlocked pre-check: nothing to stop -> answer immediately rather than
+    # waiting for the browser lock.
+    if not engine.is_running:
         return {'status': 'success'}
-    except Exception as e:
-        logger.error('stop_engine: %s', e)
-        raise HTTPException(status_code=500, detail=str(e))
+    async with _browser_lock:
+        try:
+            await engine.stop()
+            return {'status': 'success'}
+        except Exception as e:
+            logger.error('stop_engine: %s', e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.post('/engine/interrupt')
+async def interrupt():
+    """Signal any in-flight wait_for_response to bail out immediately.
+
+    Deliberately NOT @_locked: the entire purpose is to interrupt whatever
+    browser operation is currently holding the lock (typically a wait loop that
+    can otherwise hold it for up to its full timeout), so this must run without
+    queueing behind that lock. The flag is cleared at the start of the next
+    wait_for_response, so a stale set never poisons a subsequent run."""
+    engine._stop_automation_event.set()
+    return {'status': 'success'}
 
 class RegistrationRequest(BaseModel):
     profile_name: Optional[str] = None  # None = auto-pick next slot (Create), set = use existing (Rebuild)
