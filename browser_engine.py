@@ -451,11 +451,20 @@ class BrowserEngine:
             # Kill the child subprocess if we launched Chrome directly
             if hasattr(self, '_reg_chrome_proc') and self._reg_chrome_proc:
                 try:
-                    pid = self._reg_chrome_proc.pid
-                    if os.name == 'nt':
-                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
-                    else:
-                        self._reg_chrome_proc.terminate()
+                    import asyncio
+                    # Wait up to 10 seconds for graceful exit to allow Preferences (account_info) flush
+                    for _ in range(20):
+                        if self._reg_chrome_proc.poll() is not None:
+                            logger.info('stop_registration: chrome exited gracefully')
+                            break
+                        await asyncio.sleep(0.5)
+
+                    if self._reg_chrome_proc.poll() is None:
+                        pid = self._reg_chrome_proc.pid
+                        if os.name == 'nt':
+                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
+                        else:
+                            self._reg_chrome_proc.terminate()
                 except Exception as e:
                     logger.warning('stop_registration: failed to kill chrome process tree: %s', e)
                 self._reg_chrome_proc = None

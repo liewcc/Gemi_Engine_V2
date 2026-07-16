@@ -185,6 +185,7 @@ async def browser_status():
         'headless': getattr(engine, 'headless', False),
         'active_profile': getattr(engine, 'active_profile', None),
         'registration_active': getattr(engine, '_reg_context', None) is not None,
+        'last_registration_result': getattr(engine, '_last_registration_result', None),
     }
 
 @app.get('/browser/tabs')
