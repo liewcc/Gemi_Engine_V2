@@ -5,6 +5,16 @@ import shutil
 import subprocess
 import json
 import re
+
+# Portable browsers: default to <this dir>/ms-playwright unless the caller
+# already set it. Must run before the playwright driver subprocess starts,
+# which inherits os.environ. Covers entry points that bypass run.ps1
+# (mcp/server.py Popen, manual `python engine_service.py`).
+os.environ.setdefault(
+    "PLAYWRIGHT_BROWSERS_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "ms-playwright"),
+)
+
 from playwright.async_api import async_playwright
 
 from providers.gemini.sequences import GeminiSequences
@@ -182,8 +192,18 @@ class BrowserEngine:
             sandbox_default = os.path.join(self._sandbox_dir, 'Default')
             if os.path.exists(target_profile):
                 cmd = f'mklink /J "{sandbox_default}" "{target_profile}"'
-                subprocess.run(cmd, shell=True, capture_output=True)
-                
+                # mklink is a cmd builtin: on failure it prints to stdout and
+                # returns non-zero but raises nothing. Without this check a failed
+                # junction (stale Default, locked files, permissions) would be
+                # swallowed and Chrome would launch on an empty sandbox — a blank,
+                # signed-out browser with no error. Surface it instead.
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                if result.returncode != 0 or not os.path.exists(sandbox_default):
+                    detail = (result.stdout or result.stderr or '').strip()
+                    raise RuntimeError(
+                        f"Failed to junction profile into sandbox "
+                        f"({sandbox_default} -> {target_profile}): {detail}")
+
                 # Copy Local State to preserve DPAPI encrypted master keys for cookie decryption
                 source_local_state = os.path.join(source_user_data, 'Local State')
                 sandbox_local_state = os.path.join(self._sandbox_dir, 'Local State')
