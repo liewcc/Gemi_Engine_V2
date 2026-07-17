@@ -170,80 +170,89 @@ class GeminiSequences(ProviderAdapter):
         added_count = 0
         removed_count = 0
 
-        # 2. Remove Phase: Delete files from browser whose STEM is NOT in target
-        for i, stem in enumerate(attached_stems):
-            if stem not in target_stems:
-                real_name = attached_filenames[i]
-                try:
-                    log_debug(f"Removing (Stem mismatch): {real_name}")
-                    selector = f'button[data-test-id="cancel-button"][aria-label*="{real_name}"]'
-                    btn = self._e._page.locator(selector).first
-                    if await btn.is_visible():
-                        await btn.click()
-                        removed_count += 1
-                        await asyncio.sleep(0.8)
-                except Exception as e:
-                    log_debug(f"Remove failed: {real_name} -> {e}")
+        try:
+            # 2. Remove Phase: Delete files from browser whose STEM is NOT in target
+            for i, stem in enumerate(attached_stems):
+                if self._e._stop_automation_event.is_set(): break
+                if stem not in target_stems:
+                    real_name = attached_filenames[i]
+                    try:
+                        log_debug(f"Removing (Stem mismatch): {real_name}")
+                        selector = f'button[data-test-id="cancel-button"][aria-label*="{real_name}"]'
+                        btn = self._e._page.locator(selector).first
+                        if await btn.is_visible():
+                            await btn.click()
+                            removed_count += 1
+                            await self._e.interruptible_sleep(0.8)
+                    except Exception as e:
+                        log_debug(f"Remove failed: {real_name} -> {e}")
 
-        # 3. Add Phase: Upload local files whose STEM is NOT in browser
-        for stem, (orig_name, full_path) in target_map.items():
-            if stem not in attached_stems:
-                if not os.path.exists(full_path):
-                    continue
+            # 3. Add Phase: Upload local files whose STEM is NOT in browser
+            for stem, (orig_name, full_path) in target_map.items():
+                if self._e._stop_automation_event.is_set(): break
+                if stem not in attached_stems:
+                    if not os.path.exists(full_path):
+                        continue
 
-                try:
-                    log_debug(f"Adding (New stem): {orig_name}")
-                    async with self._e._page.expect_file_chooser(timeout=20000) as fc_info:
-                        await self._e._page.evaluate('''() => {
-                            const plusBtn = document.querySelector('button[aria-label="Upload & tools"]') ||
-                                            document.querySelector('button[aria-label="Open upload file menu"]') ||
-                                            document.querySelector('button[aria-label*="upload" i]') ||
-                                            document.querySelector('button[aria-label*="Upload" i]');
-                            if (plusBtn) {
-                                plusBtn.click();
-                            } else {
-                                const gemsIcon = document.querySelector('mat-icon[data-mat-icon-name="add_2"]') ||
-                                               document.querySelector('mat-icon[fonticon="add"]');
-                                if (gemsIcon) { gemsIcon.closest('button').click(); }
-                            }
-                        }''')
-                        await asyncio.sleep(1.2)
-                        await self._e._page.evaluate('''() => {
-                            const explicitIcon = document.querySelector('[data-test-id="local-images-files-uploader-icon"]');
-                            if (explicitIcon) {
-                                const menuItem = explicitIcon.closest('.mat-mdc-menu-item, [role="menuitem"], button');
-                                if (menuItem) {
-                                    menuItem.click();
-                                    return;
+                    try:
+                        log_debug(f"Adding (New stem): {orig_name}")
+                        async with self._e._page.expect_file_chooser(timeout=20000) as fc_info:
+                            await self._e._page.evaluate('''() => {
+                                const plusBtn = document.querySelector('button[aria-label="Upload & tools"]') ||
+                                                document.querySelector('button[aria-label="Open upload file menu"]') ||
+                                                document.querySelector('button[aria-label*="upload" i]') ||
+                                                document.querySelector('button[aria-label*="Upload" i]');
+                                if (plusBtn) {
+                                    plusBtn.click();
+                                } else {
+                                    const gemsIcon = document.querySelector('mat-icon[data-mat-icon-name="add_2"]') ||
+                                                   document.querySelector('mat-icon[fonticon="add"]');
+                                    if (gemsIcon) { gemsIcon.closest('button').click(); }
                                 }
-                            }
+                            }''')
+                            await asyncio.sleep(1.2)
+                            await self._e._page.evaluate('''() => {
+                                const explicitIcon = document.querySelector('[data-test-id="local-images-files-uploader-icon"]');
+                                if (explicitIcon) {
+                                    const menuItem = explicitIcon.closest('.mat-mdc-menu-item, [role="menuitem"], button');
+                                    if (menuItem) {
+                                        menuItem.click();
+                                        return;
+                                    }
+                                }
 
-                            const opt = Array.from(document.querySelectorAll('.menu-text, span, .mdc-list-item__primary-text'))
-                                             .find(i => {
-                                                 const txt = i.innerText.toLowerCase();
-                                                 return txt.includes("upload") || txt.includes("attach");
-                                             });
-                            if (opt) opt.click();
-                        }''')
-                        file_chooser = await fc_info.value
-                        await file_chooser.set_files(full_path)
+                                const opt = Array.from(document.querySelectorAll('.menu-text, span, .mdc-list-item__primary-text'))
+                                                 .find(i => {
+                                                     const txt = i.innerText.toLowerCase();
+                                                     return txt.includes("upload") || txt.includes("attach");
+                                                 });
+                                if (opt) opt.click();
+                            }''')
+                            file_chooser = await fc_info.value
+                            await file_chooser.set_files(full_path)
 
-                    # PROACTIVE: Immediately check for the MMGen disclaimer after upload
-                    await self.dismiss_agreement_popups()
+                        # PROACTIVE: Immediately check for the MMGen disclaimer after upload
+                        await self.dismiss_agreement_popups()
 
-                    added_count += 1
-                    await asyncio.sleep(2.5)
-                except Exception as e:
-                    log_debug(f"Add failed: {orig_name} -> {e}")
-            else:
-                log_debug(f"Skipping (Stem already present): {orig_name}")
+                        added_count += 1
+                        await self._e.interruptible_sleep(2.5)
+                    except Exception as e:
+                        log_debug(f"Add failed: {orig_name} -> {e}")
+                else:
+                    log_debug(f"Skipping (Stem already present): {orig_name}")
 
-        return {
+        except asyncio.CancelledError:
+            pass
+
+        ret = {
             "status": "success",
             "added": added_count,
             "removed": removed_count,
             "total_now": len(file_paths)
         }
+        if self._e._stop_automation_event.is_set():
+            ret["interrupted"] = True
+        return ret
 
     async def clear_attachments(self):
         """
@@ -2562,7 +2571,7 @@ class GeminiSequences(ProviderAdapter):
                              document.querySelector('mat-icon[fonticon="add"]');
                 if (icon) { icon.closest('button').click(); }
             }''')
-            await asyncio.sleep(1.2)
+            await self._e.interruptible_sleep(1.2)
             await self._e._page.evaluate('''() => {
                 const explicit = document.querySelector(
                     '[data-test-id="local-images-files-uploader-icon"]');
@@ -2579,7 +2588,7 @@ class GeminiSequences(ProviderAdapter):
             await chooser.set_files(path)
 
         await self.dismiss_agreement_popups()
-        await asyncio.sleep(2.5)
+        await self._e.interruptible_sleep(2.5)
         logger.debug("attach_file: uploaded %s", path)
 
     async def remove_file(self, path: str):
@@ -2598,7 +2607,7 @@ class GeminiSequences(ProviderAdapter):
                 btn = self._e._page.locator(selector).first
                 if await btn.is_visible():
                     await btn.click()
-                    await asyncio.sleep(0.8)
+                    await self._e.interruptible_sleep(0.8)
                     logger.debug("remove_file: removed %s", display_name)
                     return
         logger.debug("remove_file: no attachment matched stem %s", stem)

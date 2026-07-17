@@ -44,6 +44,7 @@ def _locked(fn):
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         async with _browser_lock:
+            engine._stop_automation_event.clear()
             return await fn(*args, **kwargs)
     return wrapper
 
@@ -225,6 +226,7 @@ async def stop_engine():
     # waiting for the browser lock.
     if not engine.is_running:
         return {'status': 'success'}
+    engine._stop_automation_event.set()
     async with _browser_lock:
         try:
             await engine.stop()

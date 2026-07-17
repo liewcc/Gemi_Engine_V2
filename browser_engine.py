@@ -150,6 +150,15 @@ class BrowserEngine:
         import asyncio as _asyncio
         self._stop_automation_event = _asyncio.Event()
 
+    async def interruptible_sleep(self, seconds: float):
+        import asyncio as _asyncio
+        slept = 0.0
+        while slept < seconds:
+            if self._stop_automation_event.is_set():
+                raise _asyncio.CancelledError()
+            await _asyncio.sleep(min(0.2, seconds - slept))
+            slept += 0.2
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     async def start(self, headless: bool = True, profile_name: str = None):
