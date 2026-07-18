@@ -928,25 +928,31 @@ class GeminiSequences(ProviderAdapter):
         except Exception:
             logger.debug("new_chat: prompt input did not appear within 5s.")
 
-        # Scan-on-ready: Gemini's model/tool menus change over time, so we
-        # discover capabilities once after every new chat to keep _caps fresh.
-        # apply_settings then validates against _caps before clicking.
-        try:
-            res = await self.discover_capabilities()
-            if res.get("status") == "success":
-                data = res.get("data", {})
-                self._caps = {
-                    "models": data.get("models", []),
-                    "main_tools": data.get("main_tools", []),
-                    "sub_tools": data.get("sub_tools", {}),
-                    "thinking_levels": data.get("thinking_levels", []),
-                }
-                logger.debug(f"Scan-on-ready cached: {len(self._caps['models'])} models, "
-                          f"{len(self._caps['main_tools'])} tools")
-            else:
-                logger.debug(f"Scan-on-ready failed: {res.get('message')}. _caps unchanged.")
-        except Exception as exc:
-            logger.debug(f"Scan-on-ready error (non-fatal): {exc}")
+        # Scan-on-ready: populate _caps on the FIRST new chat of a browser
+        # session only (providers are recreated on browser restart, so _caps
+        # empty == fresh session). Subsequent new chats (redo recovery,
+        # account switch) reuse the cached scan — the web app's menus don't
+        # change mid-session. apply_settings validates against _caps.
+        if not self._caps:
+            try:
+                res = await self.discover_capabilities()
+                # Only cache a scan that actually found models: a success with
+                # empty results (selector drift) must stay uncached so the next
+                # new_chat retries instead of pinning empty caps for the session.
+                if res.get("status") == "success" and res.get("data", {}).get("models"):
+                    data = res.get("data", {})
+                    self._caps = {
+                        "models": data.get("models", []),
+                        "main_tools": data.get("main_tools", []),
+                        "sub_tools": data.get("sub_tools", {}),
+                        "thinking_levels": data.get("thinking_levels", []),
+                    }
+                    logger.debug(f"Scan-on-ready cached: {len(self._caps['models'])} models, "
+                              f"{len(self._caps['main_tools'])} tools")
+                else:
+                    logger.debug(f"Scan-on-ready failed: {res.get('message')}. _caps unchanged.")
+            except Exception as exc:
+                logger.debug(f"Scan-on-ready error (non-fatal): {exc}")
 
         return {"status": "success", "message": f"New chat started (url={self._e._page.url})."}
 
@@ -998,7 +1004,8 @@ class GeminiSequences(ProviderAdapter):
         if not self._caps:
             try:
                 res = await self.discover_capabilities()
-                if res.get("status") == "success":
+                # Same guard as new_chat's scan-on-ready: don't cache an empty scan.
+                if res.get("status") == "success" and res.get("data", {}).get("models"):
                     data = res.get("data", {})
                     self._caps = {
                         "models": data.get("models", []),
