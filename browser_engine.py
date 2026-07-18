@@ -1053,6 +1053,15 @@ class BrowserEngine:
     async def get_current_attachments(self) -> list:
         return await self._get_provider().get_current_attachments()
 
+    async def clear_attachments(self):
+        provider = self._get_provider()
+        if hasattr(provider, "clear_attachments"):
+            await provider.clear_attachments()
+            return
+        # ponytail: only the gemini provider has a native clear; others fall back to removing chips one by one
+        for name in await provider.get_current_attachments():
+            await provider.remove_file(name)
+
     async def submit(self):
         await self._get_provider().submit()
 
