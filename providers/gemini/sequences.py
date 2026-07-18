@@ -263,16 +263,22 @@ class GeminiSequences(ProviderAdapter):
             return {"status": "error", "message": "Browser not started"}
 
         try:
-            # Locate all cancel buttons
-            buttons = await self._e._page.query_selector_all('button[data-test-id="cancel-button"]')
+            sel = ('button[data-test-id="cancel-button"], '
+                   'button[aria-label="close attachment"]')
             removed = 0
-            for btn in buttons:
-                try:
-                    await btn.click()
-                    removed += 1
-                    await asyncio.sleep(0.5)
-                except:
-                    continue
+            # New-style chips ignore trusted pointer clicks (overlay swallows
+            # them) but respond to synthetic JS clicks — inverse of the upload
+            # menu. Click one per pass; cap passes to avoid looping forever on
+            # a chip that refuses to die.
+            for _ in range(20):
+                hit = await self._e._page.evaluate(
+                    '''(sel) => { const b = document.querySelector(sel);
+                                  if (b) { b.click(); return 1; } return 0; }''',
+                    sel)
+                if not hit:
+                    break
+                removed += 1
+                await asyncio.sleep(0.6)
             return {"status": "success", "removed": removed}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -513,7 +519,7 @@ class GeminiSequences(ProviderAdapter):
                     // Metadata for reset detection
                     const editor = document.querySelector('.ql-editor');
                     const inputEmpty = !editor || !editor.innerText.trim();
-                    const attachmentCount = document.querySelectorAll('button[data-test-id="cancel-button"]').length;
+                    const attachmentCount = document.querySelectorAll('button[data-test-id="cancel-button"], button[aria-label="close attachment"]').length;
 
                     // No conversation history visible - Gemini was reset or is a fresh session.
                     if (responses.length === 0) {
@@ -2527,8 +2533,9 @@ class GeminiSequences(ProviderAdapter):
 
     async def _get_attached_filenames(self) -> list[str]:
         """Return list of display filenames currently shown in the attachment strip."""
+        # ponytail: new-style image chips are nameless — their "close attachment" label parses to the placeholder name "attachment", so stem-skip only misfires for local files literally named attachment.*
         raw_labels = await self._e._page.evaluate('''() => {
-            const buttons = Array.from(document.querySelectorAll('button[data-test-id="cancel-button"]'));
+            const buttons = Array.from(document.querySelectorAll('button[data-test-id="cancel-button"], button[aria-label="close attachment"]'));
             return buttons.map(btn => btn.getAttribute('aria-label') || '').filter(l => l.length > 0);
         }''')
         filenames = []
@@ -2566,33 +2573,71 @@ class GeminiSequences(ProviderAdapter):
             logger.debug("attach_file: already attached (stem match): %s", path)
             return
 
-        async with self._e._page.expect_file_chooser(timeout=20_000) as fc_info:
-            await self._e._page.evaluate('''() => {
-                const plusBtn =
-                    document.querySelector('button[aria-label="Upload & tools"]') ||
-                    document.querySelector('button[aria-label="Open upload file menu"]') ||
-                    document.querySelector('button[aria-label*="upload" i]') ||
-                    document.querySelector('button[aria-label*="Upload" i]');
-                if (plusBtn) { plusBtn.click(); return; }
-                const icon = document.querySelector('mat-icon[data-mat-icon-name="add_2"]') ||
-                             document.querySelector('mat-icon[fonticon="add"]');
-                if (icon) { icon.closest('button').click(); }
-            }''')
-            await self._e.interruptible_sleep(1.2)
-            await self._e._page.evaluate('''() => {
-                const explicit = document.querySelector(
-                    '[data-test-id="local-images-files-uploader-icon"]');
-                if (explicit) {
-                    const item = explicit.closest('.mat-mdc-menu-item, [role="menuitem"], button');
-                    if (item) { item.click(); return; }
-                }
-                const opt = Array.from(document.querySelectorAll(
-                    '.menu-text, span, .mdc-list-item__primary-text'))
-                    .find(i => /upload|attach/i.test(i.innerText));
-                if (opt) opt.click();
-            }''')
-            chooser = await fc_info.value
-            await chooser.set_files(path)
+        for attempt in range(2):
+            try:
+                async with self._e._page.expect_file_chooser(timeout=15_000) as fc_info:
+                    # Gemini 2026-07: menu ignores synthetic JS clicks — must use trusted Playwright clicks (JS path kept as fallback)
+                    opened = False
+                    for sel in ('button[aria-label="Upload & tools"]',
+                                'button[aria-label="Open upload file menu"]',
+                                'button[aria-label*="upload" i]'):
+                        loc = self._e._page.locator(sel).first
+                        try:
+                            if await loc.count() and await loc.is_visible():
+                                await loc.click()
+                                opened = True
+                                break
+                        except Exception:
+                            continue
+                    if not opened:
+                        # drift fallback: old synthetic-JS path
+                        await self._e._page.evaluate('''() => {
+                            const plusBtn =
+                                document.querySelector('button[aria-label="Upload & tools"]') ||
+                                document.querySelector('button[aria-label="Open upload file menu"]') ||
+                                document.querySelector('button[aria-label*="upload" i]') ||
+                                document.querySelector('button[aria-label*="Upload" i]');
+                            if (plusBtn) { plusBtn.click(); return; }
+                            const icon = document.querySelector('mat-icon[data-mat-icon-name="add_2"]') ||
+                                         document.querySelector('mat-icon[fonticon="add"]');
+                            if (icon) { icon.closest('button').click(); }
+                        }''')
+
+                    icon = self._e._page.locator('[data-test-id="local-images-files-uploader-icon"]').first
+                    try:
+                        await icon.wait_for(state="visible", timeout=6000)
+                    except Exception:
+                        pass  # fall through — the click step has its own fallbacks
+
+                    clicked = False
+                    try:
+                        if await icon.count() and await icon.is_visible():
+                            await icon.click()
+                            clicked = True
+                    except Exception:
+                        pass
+                    if not clicked:
+                        await self._e._page.evaluate('''() => {
+                            const explicit = document.querySelector(
+                                '[data-test-id="local-images-files-uploader-icon"]');
+                            if (explicit) {
+                                const item = explicit.closest('.mat-mdc-menu-item, [role="menuitem"], button');
+                                if (item) { item.click(); return; }
+                            }
+                            const opt = Array.from(document.querySelectorAll(
+                                '.menu-text, span, .mdc-list-item__primary-text'))
+                                .find(i => /upload|attach/i.test(i.innerText));
+                            if (opt) opt.click();
+                        }''')
+                    chooser = await fc_info.value
+                    await chooser.set_files(path)
+                break
+            except Exception:
+                if attempt == 0:
+                    await self._e._page.keyboard.press("Escape")
+                    await self._e.interruptible_sleep(1.0)
+                else:
+                    raise
 
         await self.dismiss_agreement_popups()
         await self._e.interruptible_sleep(2.5)
@@ -2767,7 +2812,7 @@ class GeminiSequences(ProviderAdapter):
                 const top = allR.filter(el => !allR.some(p => p !== el && p.contains(el)));
                 if (!top.length) return { status: "reset", text: "",
                     inputEmpty: !(document.querySelector(".ql-editor") || {innerText:""}).innerText.trim(),
-                    attachmentCount: document.querySelectorAll("button[data-test-id=\\"cancel-button\\"]").length };
+                    attachmentCount: document.querySelectorAll("button[data-test-id=\\"cancel-button\\"], button[aria-label=\\"close attachment\\"]").length };
 
                 const last = top[top.length - 1];
                 const imgEl = last.querySelector(

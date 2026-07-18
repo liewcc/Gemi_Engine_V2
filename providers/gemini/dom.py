@@ -69,7 +69,7 @@ class GeminiDOM:
         return f'button[data-test-id="cancel-button"][aria-label*="{file_name}"]'
 
     def cancel_upload_buttons(self) -> str:
-        return 'button[data-test-id="cancel-button"]'
+        return 'button[data-test-id="cancel-button"], button[aria-label="close attachment"]'
 
     # ── Response Detection ─────────────────────────────────────────────────────
 
