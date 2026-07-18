@@ -5,3 +5,4 @@ httpx
 pillow
 python-multipart
 psutil
+msvc-runtime; platform_system == "Windows"
