@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+ms-playwright/
 *.pyc
 browser_user_data/
 browser_session_sandbox/
