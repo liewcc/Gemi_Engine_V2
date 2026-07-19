@@ -21,7 +21,7 @@ logging.basicConfig(
     handlers=[_log_handler],
     format='%(asctime)s %(levelname)-8s %(name)-20s %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    level=logging.INFO,
+    level=os.environ.get('GEMI_LOG_LEVEL', 'INFO').upper(),
 )
 logger = logging.getLogger('engine')
 
