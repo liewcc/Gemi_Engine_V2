@@ -1943,8 +1943,10 @@ class GeminiSequences(ProviderAdapter):
                     async with self._e._page.expect_download(timeout=120000) as download_info:
                         try:
                             await self._e._page.locator(
-                                'mat-dialog-container button[aria-label="Download full-sized image"], '
-                                '.cdk-overlay-container .cdk-overlay-pane button[aria-label="Download full-sized image"]'
+                                # Gemini renamed this label "Download full-sized" -> "full size";
+                                # substring match survives both and future wording drift.
+                                'mat-dialog-container button[aria-label*="Download full" i], '
+                                '.cdk-overlay-container .cdk-overlay-pane button[aria-label*="Download full" i]'
                             ).first.click(timeout=5000)
                         except Exception as primary_click_err:
                             logger.debug(f"DL-DIAG: Primary download-button click failed ({primary_click_err}), resolving via handle...")
@@ -1953,8 +1955,8 @@ class GeminiSequences(ProviderAdapter):
                                 const overlay = document.querySelector('.cdk-overlay-container .cdk-overlay-pane');
                                 const scope = dialog || overlay || document;
 
-                                // Most specific: aria-label="Download full-sized image"
-                                let btn = scope.querySelector('button[aria-label="Download full-sized image"]');
+                                // Label drifted "full-sized" -> "full size"; substring match covers both
+                                let btn = scope.querySelector('button[aria-label*="Download full" i]');
                                 if (!btn) {
                                     // Fallback: closest button to a download mat-icon
                                     const icon = scope.querySelector(
