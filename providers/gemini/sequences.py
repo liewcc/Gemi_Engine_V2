@@ -2615,7 +2615,11 @@ class GeminiSequences(ProviderAdapter):
             except Exception:
                 return False
 
-        menu_selectors = ('button[aria-label="Upload & tools"]',
+        # Stem match first: the exact label has already drifted once
+        # ("Upload & tools" -> "Upload and tools", 2026-07-21) and only the loose
+        # last candidate caught it.
+        menu_selectors = ('button[aria-label*="Upload" i][aria-label*="tools" i]',
+                          'button[aria-label="Upload & tools"]',
                           'button[aria-label="Open upload file menu"]',
                           'button[aria-label*="upload" i]')
         open_menu_js = '''() => {

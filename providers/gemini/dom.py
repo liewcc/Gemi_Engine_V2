@@ -49,7 +49,12 @@ class GeminiDOM:
         return 'button[data-test-id="bard-mode-menu-button"]'
 
     def upload_tools_button(self) -> list[str]:
+        # Gemini 2026-07-21: "Upload & tools" became "Upload and tools". Exact
+        # aria-label matching breaks on wording edits, so match the stable stems
+        # case-insensitively first — same lesson as download_full_size_button
+        # ("full-sized" -> "full size").
         return [
+            'button[aria-label*="Upload" i][aria-label*="tools" i]',
             'button[aria-label="Upload & tools"]',
             'button.toolbox-drawer-button',
         ]
