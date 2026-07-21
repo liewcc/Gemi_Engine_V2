@@ -1509,7 +1509,7 @@ class GeminiSequences(ProviderAdapter):
     async def download_images(self, save_dir, naming_cfg, extra_meta=None):
         """
         Downloads images from the last response and enriches metadata.
-        naming_cfg: {prefix, padding, start}
+        naming_cfg: {prefix, padding, start, gap_fill}
         extra_meta: {prompt, url, upload_path}
         """
         if not self._e.is_running:
@@ -1604,7 +1604,10 @@ class GeminiSequences(ProviderAdapter):
         padding = naming_cfg.get("padding", 2)
         start_idx = naming_cfg.get("start", 1)
 
-        gap_fill = load_config().get("track_last_file_num", False)
+        # Naming policy is the caller's, never the engine's: it arrives in
+        # naming_cfg. Default True keeps the historic "scan forward" behaviour
+        # for callers that do not express a preference.
+        gap_fill = naming_cfg.get("gap_fill", True)
 
         def _next_free(idx):
             return resolve_next_number(save_dir, prefix, padding, idx, gap_fill)
