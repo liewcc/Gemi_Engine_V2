@@ -2346,23 +2346,27 @@ class GeminiSequences(ProviderAdapter):
         if not self._e.is_running:
             raise Exception("Browser Engine not started")
 
-        # 1. Cookie-based check (language-independent, fast, and robust source of truth)
+        # 1. Cookie check — a fast NEGATIVE only. Session cookies survive in the jar
+        # long after Google invalidates them server-side, so their presence proves
+        # nothing; treating it as proof once reported a signed-out profile as
+        # logged in for a whole evening, and every attach_file failed behind it.
+        # Absence, however, is conclusive: no session cookie means no session.
+        cookie_account_id = None
         try:
             cookies = await self._e._browser.cookies()
             has_session = any(c.get('name') in ('__Secure-1PSID', '__Secure-3PSID', 'SID') and '.google.com' in c.get('domain', '') for c in cookies)
-            if has_session:
-                account_id = "Active Account"
-                active_profile = getattr(self._e, 'active_profile', None)
-                if active_profile:
-                    try:
-                        cache = self._e._load_profile_cache()
-                        info = cache.get(active_profile, {})
-                        email = info.get('user_name', '').strip()
-                        if email:
-                            account_id = email
-                    except Exception:
-                        pass
-                return {"logged_in": True, "account_id": account_id, "status": "logged_in"}
+            if not has_session:
+                return {"logged_in": False, "account_id": None, "status": "not_logged_in"}
+            active_profile = getattr(self._e, 'active_profile', None)
+            if active_profile:
+                try:
+                    cache = self._e._load_profile_cache()
+                    email = cache.get(active_profile, {}).get('user_name', '').strip()
+                    # Cached profile metadata: only a name to attach to a login the
+                    # DOM has confirmed, never evidence of one.
+                    cookie_account_id = email or None
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning("get_account_info cookie check failed: %s", e)
 
@@ -2401,8 +2405,14 @@ class GeminiSequences(ProviderAdapter):
                 target_signin = signin_locators.nth(i)
                 break
 
+        # A visible sign-in control outranks a visible avatar: the signed-out Gemini
+        # landing page renders both, and reading the avatar first is what let a dead
+        # session pass as live.
+        if is_not_logged_in:
+            return {"logged_in": False, "account_id": None, "status": "not_logged_in"}
+
         if is_logged_in and target_avatar:
-            account_id = "Unknown Account"
+            account_id = cookie_account_id or "Unknown Account"
             try:
                 # Traverse up from the element to find an aria-label or title with the email
                 aria_label = await target_avatar.evaluate('''el => {
@@ -2430,17 +2440,15 @@ class GeminiSequences(ProviderAdapter):
 
             return {"logged_in": True, "account_id": account_id, "status": "logged_in"}
 
-        elif is_not_logged_in:
-            return {"logged_in": False, "account_id": None, "status": "not_logged_in"}
+        # Neither indicator visible (SPA mid-render): the sidebar only renders for a
+        # live session, so it is the one remaining positive signal worth trusting.
+        chat_list = self._e._page.locator(self._dom.conversations_list()).first
+        if await chat_list.is_visible():
+            return {"logged_in": True,
+                    "account_id": cookie_account_id or "Unknown (sidebar detected)",
+                    "status": "logged_in"}
 
-        else:
-            # Fallback: check Gemini sidebar conversations list
-            chat_list = self._e._page.locator(self._dom.conversations_list()).first
-            if await chat_list.is_visible():
-                account_id = "Unknown (sidebar detected)"
-                return {"logged_in": True, "account_id": account_id, "status": "logged_in"}
-
-            return {"logged_in": False, "account_id": None, "status": "unknown"}
+        return {"logged_in": False, "account_id": None, "status": "unknown"}
 
     async def get_gem_title(self) -> dict:
         """Extracts the Custom Gem Title from the active Gemini page."""
