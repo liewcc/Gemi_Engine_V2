@@ -59,7 +59,7 @@ def resolve_next_number(save_dir, prefix, padding, start, track_last):
     # (different extension, stray file); step past those too.
     while os.path.exists(path_for(resolved)):
         resolved += 1
-    logger.debug(f"Naming: start={start}, folder max={highest}, using {resolved}.")
+    logger.info(f"naming: start={start} folder_max={highest} track_last={track_last} -> {resolved}")
     return resolved
 
 
@@ -1914,7 +1914,7 @@ class GeminiSequences(ProviderAdapter):
                         # Size validation: file must be >= 1.5MB, else the dialog hi-res img wasn't ready.
                         file_sz = os.path.getsize(save_path)
                         if file_sz < 1536 * 1024:
-                            logger.debug(f"DL-DIAG: Canvas result still too small ({file_sz/1024:.1f}KB < 1.5MB). Low-res placeholder captured. Discarding.")
+                            logger.info(f"discarded {save_name}: canvas result {file_sz/1024:.0f}KB < 1.5MB (low-res placeholder)")
                             try:
                                 os.remove(save_path)
                             except Exception as rm_err:
@@ -1928,7 +1928,7 @@ class GeminiSequences(ProviderAdapter):
                             for old_ahash in seen_hashes:
                                 distance = bin(new_ahash ^ old_ahash).count('1')
                                 if distance <= 3:
-                                    logger.debug(f"Duplicate image content detected (aHash={hex(new_ahash)}, distance={distance}). Deleting duplicate: {save_name}")
+                                    logger.info(f"discarded {save_name}: duplicate of an image already saved this round (aHash distance {distance})")
                                     try:
                                         os.remove(save_path)
                                     except Exception as rm_err:
@@ -1944,7 +1944,7 @@ class GeminiSequences(ProviderAdapter):
                         saved_paths.append(save_path)
                         start_idx += 1
                         dl_count += 1
-                        logger.debug(f"Saved (canvas fallback): {save_name}")
+                        logger.info(f"saved {save_name} ({file_sz/1024:.0f}KB, canvas fallback) -> {save_path}")
                         continue
                     else:
                         logger.debug("DL-DIAG: Canvas extraction returned null. Skipping.")
@@ -2017,7 +2017,7 @@ class GeminiSequences(ProviderAdapter):
                 # Size validation: saved file must be >= 1.5MB
                 file_sz = os.path.getsize(save_path)
                 if file_sz < 1536 * 1024:
-                    logger.debug(f"DL-DIAG: Downloaded file too small ({file_sz/1024:.1f}KB < 1.5MB). Discarding.")
+                    logger.info(f"discarded {save_name}: downloaded {file_sz/1024:.0f}KB < 1.5MB")
                     try:
                         os.remove(save_path)
                     except Exception:
@@ -2033,7 +2033,7 @@ class GeminiSequences(ProviderAdapter):
                     for old_ahash in seen_hashes:
                         distance = bin(new_ahash ^ old_ahash).count('1')
                         if distance <= 3:
-                            logger.debug(f"Duplicate detected (aHash={hex(new_ahash)}, d={distance}). Deleting: {save_name}")
+                            logger.info(f"discarded {save_name}: duplicate of an image already saved this round (aHash distance {distance})")
                             try:
                                 os.remove(save_path)
                             except Exception:
@@ -2051,7 +2051,7 @@ class GeminiSequences(ProviderAdapter):
                 saved_paths.append(save_path)
                 start_idx += 1
                 dl_count += 1
-                logger.debug(f"Saved: {save_name}")
+                logger.info(f"saved {save_name} ({file_sz/1024:.0f}KB, native download) -> {save_path}")
 
                 await self._e._page.keyboard.press("Escape")
                 await asyncio.sleep(1.0)
@@ -2140,7 +2140,7 @@ class GeminiSequences(ProviderAdapter):
                             for old_ahash in seen_hashes:
                                 distance = bin(new_ahash ^ old_ahash).count('1')
                                 if distance <= 3:
-                                    logger.debug(f"Duplicate detected (aHash={hex(new_ahash)}, d={distance}). Deleting: {save_name}")
+                                    logger.info(f"discarded {save_name}: duplicate of an image already saved this round (aHash distance {distance})")
                                     try:
                                         os.remove(save_path)
                                     except Exception:
@@ -2156,7 +2156,7 @@ class GeminiSequences(ProviderAdapter):
                         saved_paths.append(save_path)
                         start_idx += 1
                         dl_count += 1
-                        logger.debug(f"Saved (blob rescue): {save_name}")
+                        logger.info(f"saved {save_name} ({len(raw)/1024:.0f}KB, blob rescue) -> {save_path}")
                     else:
                         err = img_data.get('error', 'unknown') if img_data else 'null_response'
                         logger.debug(f"DL-DIAG: Blob rescue failed: {err}")
