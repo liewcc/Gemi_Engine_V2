@@ -27,6 +27,42 @@ def save_with_metadata(p_img, original_img, output_path, extra_meta=None):
     p_img.save(output_path, "PNG", pnginfo=meta)
 
 
+def resolve_next_number(save_dir, prefix, padding, start, gap_fill):
+    """Resolve the number to use for the next saved image.
+
+    `start` (the caller's config number) is authoritative; this only steps over
+    collisions, so an existing file is never overwritten either way.
+      gap_fill=True  (Auto-track Last Number ON)  -> scan forward, reusing gaps.
+      gap_fill=False (OFF)                        -> a collision means the config
+          number is stale, so jump past the highest number already in the folder
+          instead of dropping the image into a hole.
+    """
+    def path_for(idx):
+        return os.path.join(save_dir, f"{prefix}{str(idx).zfill(padding)}.png")
+
+    if not os.path.exists(path_for(start)):
+        return start
+
+    if gap_fill:
+        while os.path.exists(path_for(start)):
+            start += 1
+        logger.debug(f"Auto-track: next free number is {start}.")
+        return start
+
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)\.[a-zA-Z0-9]+$", re.IGNORECASE)
+    highest = -1
+    try:
+        for filename in os.listdir(save_dir):
+            m = pattern.match(filename)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    except Exception as scan_err:
+        logger.debug(f"Error scanning save_dir: {scan_err}")
+    repaired = max(start, highest + 1)
+    logger.debug(f"Naming: {start} taken, auto-track off. Repaired to {repaired}.")
+    return repaired
+
+
 class GeminiSequences(ProviderAdapter):
     """Operation sequences for the Gemini web UI.
 
@@ -1568,29 +1604,10 @@ class GeminiSequences(ProviderAdapter):
         padding = naming_cfg.get("padding", 2)
         start_idx = naming_cfg.get("start", 1)
 
-        cfg = load_config()
-        if cfg.get("track_last_file_num", False):
-            max_num = -1
-            prefix_escaped = re.escape(prefix)
-            pattern = re.compile(rf"^{prefix_escaped}(\d+)\.[a-zA-Z0-9]+$", re.IGNORECASE)
-            try:
-                for filename in os.listdir(save_dir):
-                    match = pattern.match(filename)
-                    if match:
-                        try:
-                            num = int(match.group(1))
-                            if num > max_num:
-                                max_num = num
-                        except ValueError:
-                            pass
-            except Exception as scan_err:
-                logger.debug(f"Error scanning save_dir: {scan_err}")
+        gap_fill = load_config().get("track_last_file_num", False)
 
-            if max_num != -1:
-                logger.debug(f"Auto-track: found max number {max_num} in folder. Next number: {max_num + 1}")
-                start_idx = max_num + 1
-            else:
-                logger.debug(f"Auto-track: no existing files found. Using start number: {start_idx}")
+        def _next_free(idx):
+            return resolve_next_number(save_dir, prefix, padding, idx, gap_fill)
 
         from PIL import Image
         import io
@@ -1882,12 +1899,9 @@ class GeminiSequences(ProviderAdapter):
                     await asyncio.sleep(0.5)
 
                     if img_bytes:
-                        while True:
-                            save_name = f"{prefix}{str(start_idx).zfill(padding)}.png"
-                            save_path = os.path.join(save_dir, save_name)
-                            if not os.path.exists(save_path):
-                                break
-                            start_idx += 1
+                        start_idx = _next_free(start_idx)
+                        save_name = f"{prefix}{str(start_idx).zfill(padding)}.png"
+                        save_path = os.path.join(save_dir, save_name)
 
                         raw = bytes(img_bytes)
                         logger.debug(f"DL-DIAG: Canvas extracted {len(raw)} bytes ({len(raw)/1024:.0f}KB)")
@@ -1979,12 +1993,9 @@ class GeminiSequences(ProviderAdapter):
                     download = await download_info.value
 
                     # Determine save filename
-                    while True:
-                        save_name = f"{prefix}{str(start_idx).zfill(padding)}.png"
-                        save_path = os.path.join(save_dir, save_name)
-                        if not os.path.exists(save_path):
-                            break
-                        start_idx += 1
+                    start_idx = _next_free(start_idx)
+                    save_name = f"{prefix}{str(start_idx).zfill(padding)}.png"
+                    save_path = os.path.join(save_dir, save_name)
 
                     await download.save_as(save_path)
                     logger.debug(f"DL-DIAG: Native download completed and saved directly: {save_path}")
@@ -2112,12 +2123,9 @@ class GeminiSequences(ProviderAdapter):
                             logger.debug(f"DL-DIAG: Image too small (naturalWidth={nw} < 512). Likely a thumbnail. Skipping.")
                             continue
 
-                        while True:
-                            save_name = f"{prefix}{str(start_idx).zfill(padding)}.png"
-                            save_path = os.path.join(save_dir, save_name)
-                            if not os.path.exists(save_path):
-                                break
-                            start_idx += 1
+                        start_idx = _next_free(start_idx)
+                        save_name = f"{prefix}{str(start_idx).zfill(padding)}.png"
+                        save_path = os.path.join(save_dir, save_name)
 
                         with Image.open(io.BytesIO(raw)) as pil_img:
                             save_with_metadata(pil_img, pil_img, save_path, extra_meta=extra_meta)
