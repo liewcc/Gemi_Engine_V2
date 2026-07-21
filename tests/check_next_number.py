@@ -23,28 +23,35 @@ def _run():
         for n in (1, 2, 3, 5):  # 4 is a deliberate gap
             touch(f"{n:02d}.png")
 
-        # Config number free -> untouched, never mind what else is in the folder.
-        assert resolve_next_number(d, '', 2, 6, True) == 6
-        assert resolve_next_number(d, '', 2, 6, False) == 6
+        # ON always appends after the highest, even when start is free, so a
+        # stale config number self-heals and gaps are never reused.
+        assert resolve_next_number(d, '', 2, 1, True) == 6
+        assert resolve_next_number(d, '', 2, 4, True) == 6
+        assert resolve_next_number(d, '', 2, 9, True) == 9  # start wins when ahead
 
-        # Config number taken. ON fills the gap, OFF appends past the highest.
-        assert resolve_next_number(d, '', 2, 1, True) == 4
+        # OFF uses start as given; a collision falls back to the same append.
+        assert resolve_next_number(d, '', 2, 4, False) == 4
         assert resolve_next_number(d, '', 2, 1, False) == 6
 
-        # Neither mode may ever return an occupied number.
-        for gap_fill in (True, False):
+        # Neither mode may return an occupied number, or reuse the gap at 4
+        # unless the caller asked for exactly that number with tracking off.
+        for track_last in (True, False):
             for start in range(1, 8):
-                got = resolve_next_number(d, '', 2, start, gap_fill)
-                assert not os.path.exists(os.path.join(d, f"{got:02d}.png")), (start, gap_fill, got)
+                got = resolve_next_number(d, '', 2, start, track_last)
+                assert not os.path.exists(os.path.join(d, f"{got:02d}.png")), (start, track_last, got)
+                if track_last:
+                    assert got >= 6, (start, got)
 
         # Prefix isolation: files of another prefix must not shift this series.
         touch('other_09.png')
-        assert resolve_next_number(d, 'other_', 2, 9, False) == 10
-        assert resolve_next_number(d, '', 2, 1, False) == 6
+        assert resolve_next_number(d, 'other_', 2, 1, True) == 10
+        assert resolve_next_number(d, '', 2, 1, True) == 6
 
-        # A non-conforming name (e.g. manually renamed 04 -> 04x) stays ignored.
-        touch('04x.png')
-        assert resolve_next_number(d, '', 2, 1, True) == 4
+        # A non-conforming name (e.g. manually renamed 06 -> 06x) is ignored by
+        # the scan, but a real collision on the resolved name is still stepped over.
+        touch('06.png')
+        touch('07x.png')
+        assert resolve_next_number(d, '', 2, 1, True) == 7
 
     print("check_next_number: OK")
 

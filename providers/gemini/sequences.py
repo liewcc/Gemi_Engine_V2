@@ -27,26 +27,21 @@ def save_with_metadata(p_img, original_img, output_path, extra_meta=None):
     p_img.save(output_path, "PNG", pnginfo=meta)
 
 
-def resolve_next_number(save_dir, prefix, padding, start, gap_fill):
+def resolve_next_number(save_dir, prefix, padding, start, track_last):
     """Resolve the number to use for the next saved image.
 
-    `start` (the caller's config number) is authoritative; this only steps over
-    collisions, so an existing file is never overwritten either way.
-      gap_fill=True  (Auto-track Last Number ON)  -> scan forward, reusing gaps.
-      gap_fill=False (OFF)                        -> a collision means the config
-          number is stale, so jump past the highest number already in the folder
-          instead of dropping the image into a hole.
+    Neither mode ever returns an occupied number, and neither ever drops an
+    image into a gap left by a deleted file — new images always land after the
+    highest number in the folder.
+      track_last=True  (Auto-track Last Number ON)  -> always append after the
+          highest existing number, so an out-of-date `start` self-heals.
+      track_last=False (OFF) -> `start` (the caller's config number) is used as
+          given; only a collision forces the append-after-highest repair.
     """
     def path_for(idx):
         return os.path.join(save_dir, f"{prefix}{str(idx).zfill(padding)}.png")
 
-    if not os.path.exists(path_for(start)):
-        return start
-
-    if gap_fill:
-        while os.path.exists(path_for(start)):
-            start += 1
-        logger.debug(f"Auto-track: next free number is {start}.")
+    if not track_last and not os.path.exists(path_for(start)):
         return start
 
     pattern = re.compile(rf"^{re.escape(prefix)}(\d+)\.[a-zA-Z0-9]+$", re.IGNORECASE)
@@ -58,9 +53,14 @@ def resolve_next_number(save_dir, prefix, padding, start, gap_fill):
                 highest = max(highest, int(m.group(1)))
     except Exception as scan_err:
         logger.debug(f"Error scanning save_dir: {scan_err}")
-    repaired = max(start, highest + 1)
-    logger.debug(f"Naming: {start} taken, auto-track off. Repaired to {repaired}.")
-    return repaired
+
+    resolved = max(start, highest + 1)
+    # A number can still be taken by a name the pattern does not cover
+    # (different extension, stray file); step past those too.
+    while os.path.exists(path_for(resolved)):
+        resolved += 1
+    logger.debug(f"Naming: start={start}, folder max={highest}, using {resolved}.")
+    return resolved
 
 
 class GeminiSequences(ProviderAdapter):
@@ -1509,7 +1509,7 @@ class GeminiSequences(ProviderAdapter):
     async def download_images(self, save_dir, naming_cfg, extra_meta=None):
         """
         Downloads images from the last response and enriches metadata.
-        naming_cfg: {prefix, padding, start, gap_fill}
+        naming_cfg: {prefix, padding, start, track_last}
         extra_meta: {prompt, url, upload_path}
         """
         if not self._e.is_running:
@@ -1605,12 +1605,12 @@ class GeminiSequences(ProviderAdapter):
         start_idx = naming_cfg.get("start", 1)
 
         # Naming policy is the caller's, never the engine's: it arrives in
-        # naming_cfg. Default True keeps the historic "scan forward" behaviour
-        # for callers that do not express a preference.
-        gap_fill = naming_cfg.get("gap_fill", True)
+        # naming_cfg. Default False leaves the caller's start number alone
+        # unless it collides.
+        track_last = naming_cfg.get("track_last", False)
 
         def _next_free(idx):
-            return resolve_next_number(save_dir, prefix, padding, idx, gap_fill)
+            return resolve_next_number(save_dir, prefix, padding, idx, track_last)
 
         from PIL import Image
         import io

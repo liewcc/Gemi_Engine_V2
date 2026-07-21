@@ -139,9 +139,10 @@ class DownloadRequest(BaseModel):
     prefix: str = 'img'
     padding: int = 4
     start: int = 1
-    # True: step forward over taken numbers, reusing gaps (historic behaviour).
-    # False: on a collision, append past the highest number instead.
-    gap_fill: bool = True
+    # True: always append after the highest number already in the folder.
+    # False: use `start` as given, appending only if that number is taken.
+    # Neither mode reuses a gap left by a deleted file.
+    track_last: bool = False
     # Callers may send the naming fields nested instead of flat; both are accepted.
     naming: Optional[dict] = None
     service: Optional[str] = None
@@ -603,7 +604,7 @@ async def download_images(req: DownloadRequest):
     try:
         await _route_service(req.service)
         naming_cfg = {'prefix': req.prefix, 'padding': req.padding,
-                      'start': req.start, 'gap_fill': req.gap_fill}
+                      'start': req.start, 'track_last': req.track_last}
         if req.naming:
             naming_cfg.update({k: v for k, v in req.naming.items() if v is not None})
         result = await engine.download_images(req.save_dir, naming_cfg)
