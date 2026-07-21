@@ -16,7 +16,10 @@ import config_utils
 
 # ── Logging (set up once, all modules inherit) ─────────────────────────────────
 LOG_FILE = 'engine.log'
-_log_handler = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=3)
+# encoding is mandatory: Windows defaults this handler to cp1252, and any record
+# carrying a non-ASCII path (attachment names, save dirs) is then dropped entirely.
+_log_handler = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=3,
+                                   encoding='utf-8')
 logging.basicConfig(
     handlers=[_log_handler],
     format='%(asctime)s %(levelname)-8s %(name)-20s %(message)s',

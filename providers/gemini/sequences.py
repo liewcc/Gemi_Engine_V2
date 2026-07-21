@@ -2586,66 +2586,93 @@ class GeminiSequences(ProviderAdapter):
             logger.debug("attach_file: already attached (stem match): %s", path)
             return
 
+        # Click style per control, verified live (see DOM_SELF_HEALING §7b): the
+        # upload menu opens ONLY on trusted Playwright clicks — synthetic JS clicks
+        # silently no-op — while the attachment chips are the exact inverse. JS stays
+        # as a fallback but must never be treated as proof the menu opened.
+        # Trusted clicks carry an explicit short timeout so one swallowed click
+        # cannot eat the whole retry budget on Playwright's 30s default.
+        async def _click(selectors, js):
+            """Trusted click first, JS fallback. True if something was hit."""
+            for sel in selectors:
+                loc = self._e._page.locator(sel).first
+                try:
+                    if await loc.count() and await loc.is_visible():
+                        await loc.click(timeout=3000)
+                        return True
+                except Exception:
+                    continue
+            try:
+                return bool(await self._e._page.evaluate(js))
+            except Exception:
+                return False
+
+        menu_selectors = ('button[aria-label="Upload & tools"]',
+                          'button[aria-label="Open upload file menu"]',
+                          'button[aria-label*="upload" i]')
+        open_menu_js = '''() => {
+            const btn =
+                document.querySelector('button[aria-label="Upload & tools"]') ||
+                document.querySelector('button[aria-label="Open upload file menu"]') ||
+                document.querySelector('button[aria-label*="upload" i]') ||
+                (document.querySelector('mat-icon[data-mat-icon-name="add_2"]') || {}).closest?.('button') ||
+                (document.querySelector('mat-icon[fonticon="add"]') || {}).closest?.('button');
+            if (!btn) return false;
+            btn.click();
+            return true;
+        }'''
+
+        item_selectors = ('[data-test-id="local-images-files-uploader-icon"]',)
+        # Scoped to real menu items: the old fallback scanned every span on the page
+        # and happily "clicked" the composer's own label, masking a menu that had
+        # never opened.
+        pick_local_js = '''() => {
+            const explicit = document.querySelector(
+                '[data-test-id="local-images-files-uploader-icon"]');
+            const item = explicit && explicit.closest('.mat-mdc-menu-item, [role="menuitem"], button');
+            if (item) { item.click(); return true; }
+            const opt = Array.from(document.querySelectorAll(
+                '.mat-mdc-menu-item, [role="menuitem"]'))
+                .find(i => /upload|attach/i.test(i.innerText));
+            if (opt) { opt.click(); return true; }
+            return false;
+        }'''
+
+        async def _menu_contents():
+            """Item labels of the open menu — the evidence that says why a click failed."""
+            try:
+                return await self._e._page.evaluate(
+                    '''() => Array.from(document.querySelectorAll(
+                           '.mat-mdc-menu-item, [role="menuitem"]'))
+                           .map(i => (i.innerText || '').trim()).filter(Boolean)''')
+            except Exception:
+                return []
+
         for attempt in range(2):
             try:
                 async with self._e._page.expect_file_chooser(timeout=15_000) as fc_info:
-                    # Gemini 2026-07: menu ignores synthetic JS clicks — must use trusted Playwright clicks (JS path kept as fallback)
-                    opened = False
-                    for sel in ('button[aria-label="Upload & tools"]',
-                                'button[aria-label="Open upload file menu"]',
-                                'button[aria-label*="upload" i]'):
-                        loc = self._e._page.locator(sel).first
-                        try:
-                            if await loc.count() and await loc.is_visible():
-                                await loc.click()
-                                opened = True
-                                break
-                        except Exception:
-                            continue
-                    if not opened:
-                        # drift fallback: old synthetic-JS path
-                        await self._e._page.evaluate('''() => {
-                            const plusBtn =
-                                document.querySelector('button[aria-label="Upload & tools"]') ||
-                                document.querySelector('button[aria-label="Open upload file menu"]') ||
-                                document.querySelector('button[aria-label*="upload" i]') ||
-                                document.querySelector('button[aria-label*="Upload" i]');
-                            if (plusBtn) { plusBtn.click(); return; }
-                            const icon = document.querySelector('mat-icon[data-mat-icon-name="add_2"]') ||
-                                         document.querySelector('mat-icon[fonticon="add"]');
-                            if (icon) { icon.closest('button').click(); }
-                        }''')
+                    if not await _click(menu_selectors, open_menu_js):
+                        raise Exception("upload menu button not found")
 
-                    icon = self._e._page.locator('[data-test-id="local-images-files-uploader-icon"]').first
+                    # SPA render race: the menu item mounts after the menu opens
                     try:
-                        await icon.wait_for(state="visible", timeout=6000)
+                        await self._e._page.locator(item_selectors[0]).first.wait_for(
+                            state="visible", timeout=6000)
                     except Exception:
                         pass  # fall through — the click step has its own fallbacks
 
-                    clicked = False
-                    try:
-                        if await icon.count() and await icon.is_visible():
-                            await icon.click()
-                            clicked = True
-                    except Exception:
-                        pass
-                    if not clicked:
-                        await self._e._page.evaluate('''() => {
-                            const explicit = document.querySelector(
-                                '[data-test-id="local-images-files-uploader-icon"]');
-                            if (explicit) {
-                                const item = explicit.closest('.mat-mdc-menu-item, [role="menuitem"], button');
-                                if (item) { item.click(); return; }
-                            }
-                            const opt = Array.from(document.querySelectorAll(
-                                '.menu-text, span, .mdc-list-item__primary-text'))
-                                .find(i => /upload|attach/i.test(i.innerText));
-                            if (opt) opt.click();
-                        }''')
+                    if not await _click(item_selectors, pick_local_js):
+                        raise Exception("local-upload menu item not found")
+
                     chooser = await fc_info.value
                     await chooser.set_files(path)
                 break
-            except Exception:
+            except Exception as e:
+                # The menu's own items say whether it opened at all, and a
+                # "Sign in to try tools" entry means the profile is signed out —
+                # the upload item never opens a chooser in that state.
+                logger.info("attach_file: attempt %d failed for %s: %s | menu items: %s",
+                            attempt + 1, path, str(e).splitlines()[0], await _menu_contents())
                 if attempt == 0:
                     await self._e._page.keyboard.press("Escape")
                     await self._e.interruptible_sleep(1.0)
