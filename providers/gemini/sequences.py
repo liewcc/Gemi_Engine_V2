@@ -977,12 +977,11 @@ class GeminiSequences(ProviderAdapter):
         # change mid-session. apply_settings validates against _caps.
         if not self._caps:
             try:
-                res = await self.discover_capabilities()
-                # Only cache a scan that actually found models: a success with
+                data = await self.discover_capabilities()
+                # Only cache a scan that actually found models: a scan with
                 # empty results (selector drift) must stay uncached so the next
                 # new_chat retries instead of pinning empty caps for the session.
-                if res.get("status") == "success" and res.get("data", {}).get("models"):
-                    data = res.get("data", {})
+                if data.get("models"):
                     self._caps = {
                         "models": data.get("models", []),
                         "main_tools": data.get("main_tools", []),
@@ -992,7 +991,7 @@ class GeminiSequences(ProviderAdapter):
                     logger.debug(f"Scan-on-ready cached: {len(self._caps['models'])} models, "
                               f"{len(self._caps['main_tools'])} tools")
                 else:
-                    logger.debug(f"Scan-on-ready failed: {res.get('message')}. _caps unchanged.")
+                    logger.debug("Scan-on-ready found no models. _caps unchanged.")
             except Exception as exc:
                 logger.debug(f"Scan-on-ready error (non-fatal): {exc}")
 
@@ -1045,10 +1044,9 @@ class GeminiSequences(ProviderAdapter):
         # If _caps is empty (e.g. no new_chat was called), scan once now.
         if not self._caps:
             try:
-                res = await self.discover_capabilities()
+                data = await self.discover_capabilities()
                 # Same guard as new_chat's scan-on-ready: don't cache an empty scan.
-                if res.get("status") == "success" and res.get("data", {}).get("models"):
-                    data = res.get("data", {})
+                if data.get("models"):
                     self._caps = {
                         "models": data.get("models", []),
                         "main_tools": data.get("main_tools", []),
@@ -1266,6 +1264,17 @@ class GeminiSequences(ProviderAdapter):
                 logger.debug(f"Tool click result: {'ok' if clicked else 'not found'} for '{tool_name}'")
                 applied.append(f"tool={'ok' if clicked else 'not found'}")
 
+                # Hand the next step a closed drawer. Leaving it open made
+                # attach_file's toggle click shut it, and any later step that
+                # assumes a clean composer inherits the same trap.
+                try:
+                    if await self._e._page.locator(
+                            'mat-action-list button[role="menuitem"]').first.is_visible(timeout=1000):
+                        await self._e._page.keyboard.press("Escape")
+                        await asyncio.sleep(0.3)
+                except Exception as exc:
+                    logger.debug(f"Drawer close after tool select failed: {exc}")
+
             summary = ", ".join(applied) if applied else "nothing to apply"
             logger.debug(f"apply_settings done: {summary}")
             return {"status": "success", "message": summary}
@@ -1277,10 +1286,14 @@ class GeminiSequences(ProviderAdapter):
         """
         Scans Gemini DOM to find available models, thinking levels, and tools.
         All options are read dynamically from the live DOM — nothing is hardcoded.
-        Updates config.json with current selections only (not available options).
+
+        Returns the bare results dict, like every other provider — the caller
+        (engine_service) is what wraps it in a status envelope. Returning an
+        envelope here double-wrapped it on the wire, so both consumers, which
+        unwrap once, read models off the inner envelope and always saw none.
         """
         if not self._e.is_running:
-            return {"status": "error", "message": "Browser not started"}
+            raise RuntimeError("Browser not started")
 
         logger.debug("Starting discovery scan...")
         results = {
@@ -1500,11 +1513,11 @@ class GeminiSequences(ProviderAdapter):
             except Exception as e:
                 logger.debug(f"Failed to save discovery: {e}")
 
-            return {"status": "success", "data": results}
+            return results
 
         except Exception as e:
             logger.debug(f"Discovery failed: {e}")
-            return {"status": "error", "message": str(e)}
+            raise
 
     async def download_images(self, save_dir, naming_cfg, extra_meta=None):
         """
@@ -2618,9 +2631,14 @@ class GeminiSequences(ProviderAdapter):
         # Stem match first: the exact label has already drifted once
         # ("Upload & tools" -> "Upload and tools", 2026-07-21) and only the loose
         # last candidate caught it.
+        # Every aria-label candidate is one rename away from missing, and that
+        # label has already drifted twice. button.toolbox-drawer-button is the
+        # same control addressed by class instead: discover_capabilities opens
+        # this very drawer through it, so it is proven live on every scan.
         menu_selectors = ('button[aria-label*="Upload" i][aria-label*="tools" i]',
                           'button[aria-label="Upload & tools"]',
                           'button[aria-label="Open upload file menu"]',
+                          'button.toolbox-drawer-button',
                           'button[aria-label*="upload" i]')
         open_menu_js = '''() => {
             const btn =
@@ -2650,6 +2668,14 @@ class GeminiSequences(ProviderAdapter):
             return false;
         }'''
 
+        async def _menu_open():
+            """True if the drawer is already showing items."""
+            try:
+                return await self._e._page.locator(
+                    'mat-action-list button[role="menuitem"]').first.is_visible(timeout=1000)
+            except Exception:
+                return False
+
         async def _menu_contents():
             """Item labels of the open menu — the evidence that says why a click failed."""
             try:
@@ -2663,15 +2689,34 @@ class GeminiSequences(ProviderAdapter):
         for attempt in range(2):
             try:
                 async with self._e._page.expect_file_chooser(timeout=15_000) as fc_info:
-                    if not await _click(menu_selectors, open_menu_js):
-                        raise Exception("upload menu button not found")
+                    # That button is a toggle, so clicking it while the drawer is
+                    # already open CLOSES it. apply_settings leaves the drawer
+                    # open, so the first file of every cycle shut the menu it was
+                    # trying to use and then reported the item as missing.
+                    if not await _menu_open():
+                        if not await _click(menu_selectors, open_menu_js):
+                            raise Exception("upload menu button not found")
 
-                    # SPA render race: the menu item mounts after the menu opens
+                    # _click's verdict is not proof the menu opened: its JS
+                    # fallback reports success while silently no-opping on this
+                    # control, which surfaced as "menu item not found" against an
+                    # empty menu — blaming the item for a menu that never opened.
+                    # The items are the proof, so wait for them (same selector
+                    # discover_capabilities enumerates) and name that failure.
+                    try:
+                        await self._e._page.locator(
+                            'mat-action-list button[role="menuitem"]'
+                        ).first.wait_for(state="visible", timeout=6000)
+                    except Exception:
+                        raise Exception("upload menu did not open")
+
+                    # SPA render race: the local-upload item can mount a beat
+                    # after its siblings, so give it its own grace period.
                     try:
                         await self._e._page.locator(item_selectors[0]).first.wait_for(
-                            state="visible", timeout=6000)
+                            state="visible", timeout=3000)
                     except Exception:
-                        pass  # fall through — the click step has its own fallbacks
+                        pass  # fall through — pick_local_js matches by label too
 
                     if not await _click(item_selectors, pick_local_js):
                         raise Exception("local-upload menu item not found")
