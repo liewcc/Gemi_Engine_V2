@@ -159,6 +159,8 @@ class BrowserEngine:
         # ponytail: never-set event; providers check this to abort wait loops
         import asyncio as _asyncio
         self._stop_automation_event = _asyncio.Event()
+        self._download_busy = False
+        self._stop_pending = False
 
     async def interruptible_sleep(self, seconds: float):
         import asyncio as _asyncio

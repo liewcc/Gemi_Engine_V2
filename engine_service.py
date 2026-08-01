@@ -37,6 +37,7 @@ app = FastAPI(title='Gemi Engine V2')
 engine = BrowserEngine()
 
 _browser_lock = asyncio.Lock()
+_account_cache = {'ts': 0.0, 'data': None}
 _last_activity = time.monotonic()
 _tui_pid: int | None = None
 _tui_create_time: float | None = None
@@ -46,7 +47,13 @@ _idle_timeout_enabled: bool = True
 def _locked(fn):
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
+        if engine._stop_pending:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=409, content={'error': 'stop_pending'})
         async with _browser_lock:
+            if engine._stop_pending:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=409, content={'error': 'stop_pending'})
             engine._stop_automation_event.clear()
             return await fn(*args, **kwargs)
     return wrapper
@@ -224,25 +231,53 @@ async def start_engine(req: StartRequest):
             if req.active_service:
                 engine._active_service = req.active_service
             await engine.start(headless=headless, profile_name=profile_name)
+            _account_cache['data'] = None
             return {'status': 'success', 'message': f'Engine started (headless={headless})'}
         except Exception as e:
             logger.error('start_engine: %s', e)
             raise HTTPException(status_code=500, detail=str(e))
 
+class StopRequest(BaseModel):
+    force: bool = False
+
 @app.post('/engine/stop')
-async def stop_engine():
-    # Fast unlocked pre-check: nothing to stop -> answer immediately rather than
-    # waiting for the browser lock.
+async def stop_engine(req: StopRequest = StopRequest()):
     if not engine.is_running:
         return {'status': 'success'}
     engine._stop_automation_event.set()
-    async with _browser_lock:
+    if not req.force:
+        async with _browser_lock:
+            try:
+                await engine.stop()
+                _account_cache['data'] = None
+                return {'status': 'success'}
+            except Exception as e:
+                logger.error('stop_engine: %s', e)
+                raise HTTPException(status_code=500, detail=str(e))
+    # Force path: wait for any in-flight download to finish (cap 300 s), then close
+    # without acquiring the lock so we don't queue behind running operations.
+    engine._stop_pending = True
+    try:
+        import time as _time
+        _cap = 300.0
+        _start = _time.monotonic()
+        while engine._download_busy:
+            elapsed = _time.monotonic() - _start
+            if elapsed >= _cap:
+                logger.warning('stop_engine(force): download still busy after %.0fs — force closing', elapsed)
+                break
+            if int(elapsed) % 5 == 0:
+                logger.info('Stop requested — waiting for download to finish (%.0fs elapsed, cap %ds)', elapsed, _cap)
+            await asyncio.sleep(0.5)
         try:
             await engine.stop()
+            _account_cache['data'] = None
             return {'status': 'success'}
         except Exception as e:
-            logger.error('stop_engine: %s', e)
+            logger.error('stop_engine(force): %s', e)
             raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        engine._stop_pending = False
 
 @app.post('/engine/interrupt')
 async def interrupt():
@@ -446,10 +481,29 @@ async def eval_js(script: str = Body(..., embed=True)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/browser/account')
-@_locked
 async def get_account():
+    # Deliberately NOT @_locked: this is a read-only probe the setup UI polls on a
+    # timer. Holding the browser lock here made every poll queue behind the
+    # automation loop (20-25 s per step), which saturated the renderer's 6-socket
+    # connection pool and delayed unrelated requests (notably Stop Browser) by
+    # minutes. A short cache plus a lock-free read keeps the poll cheap.
+    if not engine.is_running:
+        return {'status': 'stopped', 'logged_in': False, 'account_id': None, 'email': None, 'name': None}
+    now = time.monotonic()
+    if _account_cache['data'] is not None and (now - _account_cache['ts']) < 10.0:
+        return _account_cache['data']
+    if _browser_lock.locked():
+        # A browser operation is in flight; never wait for it. Serve the last known
+        # value, or a neutral placeholder if we have none yet.
+        if _account_cache['data'] is not None:
+            return _account_cache['data']
+        return {'status': 'busy', 'logged_in': False, 'account_id': None, 'email': None, 'name': None}
     try:
-        return await engine.get_account_info()
+        async with _browser_lock:
+            data = await engine.get_account_info()
+        _account_cache['ts'] = time.monotonic()
+        _account_cache['data'] = data
+        return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -604,6 +658,7 @@ async def new_chat(service: Optional[str] = Query(None)):
 @app.post('/browser/download')
 @_locked
 async def download_images(req: DownloadRequest):
+    engine._download_busy = True
     try:
         await _route_service(req.service)
         naming_cfg = {'prefix': req.prefix, 'padding': req.padding,
@@ -614,6 +669,8 @@ async def download_images(req: DownloadRequest):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        engine._download_busy = False
 
 @app.post('/browser/delete_history')
 @_locked
